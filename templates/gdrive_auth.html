@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in | Google Drive</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: linear-gradient(135deg, #0f0f1a 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #e8e8f0;
+        }
+        .card {
+            background: rgba(30, 30, 50, 0.8);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 90%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        .icon { font-size: 3rem; text-align: center; margin-bottom: 20px; }
+        h1 { text-align: center; font-size: 1.5rem; font-weight: 800; margin-bottom: 8px; }
+        .subtitle { text-align: center; color: #9898b0; margin-bottom: 30px; font-size: 0.9rem; }
+        .step {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 16px;
+            padding: 16px;
+            background: rgba(255,255,255,0.04);
+            border-radius: 12px;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+        .step-num {
+            min-width: 32px;
+            height: 32px;
+            background: linear-gradient(135deg, #4ecdc4, #00b4d8);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 0.9rem;
+            flex-shrink: 0;
+        }
+        .step-text { line-height: 1.7; font-size: 0.95rem; }
+        .code-block {
+            background: #0a0a14;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 10px;
+            padding: 14px 18px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.85rem;
+            direction: ltr;
+            text-align: left;
+            color: #4ecdc4;
+            margin: 10px 0;
+            cursor: pointer;
+            user-select: all;
+        }
+        .btn {
+            display: block;
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #34a853, #4ecdc4);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-family: 'Inter', system-ui, sans-serif;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            text-align: center;
+            text-decoration: none;
+            margin-top: 24px;
+            transition: all 0.3s ease;
+        }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(52,168,83,0.4); }
+        .note {
+            text-align: center;
+            color: #9898b0;
+            font-size: 0.8rem;
+            margin-top: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔐</div>
+        <h1>Google Drive sign-in</h1>
+        <p class="subtitle">Because of Google’s security model, the login helper must run as a separate process</p>
+
+        <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-text">
+                Open a terminal in the project root (same folder as <code>gdrive_login.py</code>).
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-text">
+                Run (click to copy). Use your venv’s Python if you use one:
+                <div class="code-block" id="gd-cmd" onclick="copyText(this)">python gdrive_login.py</div>
+                <span class="note" style="display:block;margin-top:8px;text-align:left;">
+                    Windows: <code>.venv\Scripts\python.exe gdrive_login.py</code><br>
+                    Linux/macOS: <code>.venv/bin/python gdrive_login.py</code>
+                </span>
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-text">
+                A browser window opens — complete Google sign-in and allow access.
+            </div>
+        </div>
+
+        <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-text">
+                When it succeeds, return here and open the dashboard again.
+            </div>
+        </div>
+
+        <a href="/" class="btn">Done — back to dashboard</a>
+        <p class="note">After the first successful login you usually do not need to repeat this.</p>
+    </div>
+
+    <script>
+        const DEFAULT_CMD = 'python gdrive_login.py';
+        function copyText(el) {
+            navigator.clipboard.writeText(el.textContent.trim());
+            el.style.background = '#111';
+            el.textContent = 'Copied!';
+            setTimeout(() => {
+                el.style.background = '#0a0a14';
+                el.textContent = DEFAULT_CMD;
+            }, 2000);
+        }
+    </script>
+</body>
+</html>

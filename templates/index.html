@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unified Sync Tool</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #0f172a;
+            --secondary: #1e293b;
+            --accent: #3b82f6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+            --gradient: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Inter', 'Cairo', sans-serif;
+            background: var(--primary);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar Styling */
+        .sidebar {
+            width: 260px;
+            background: var(--secondary);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            padding: 15px 0;
+            box-shadow: -4px 0 15px rgba(0,0,0,0.5);
+            z-index: 10;
+        }
+
+        .brand {
+            font-size: 1.2rem;
+            font-weight: 700;
+            text-align: center;
+            padding: 0 15px 15px 15px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 10px;
+            color: var(--accent);
+        }
+
+        .nav-item {
+            padding: 12px 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 600;
+            color: var(--text-muted);
+            border-right: 3px solid transparent;
+        }
+
+        .nav-item:hover {
+            background: rgba(255,255,255,0.05);
+            color: var(--text-main);
+        }
+
+        .nav-item.active {
+            background: rgba(59, 130, 246, 0.1);
+            color: var(--text-main);
+            border-right-color: var(--accent);
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--gradient);
+            overflow: hidden;
+        }
+
+        .header {
+            padding: 15px 25px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.8);
+            backdrop-filter: blur(10px);
+        }
+
+        .header-title { font-size: 1.2rem; font-weight: 700; }
+
+        .btn-sync-all {
+            background: var(--success);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Inter', 'Cairo', sans-serif;
+            font-weight: 600;
+            font-size: 0.95rem;
+            transition: transform 0.2s, box-shadow 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-sync-all:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+        .content-area {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .tab-content { display: none; animation: fadeIn 0.3s ease; }
+        .tab-content.active { display: block; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Cards & Forms (Compact) */
+        .card {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        }
+
+        .card-header {
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--accent);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 4px; }
+        .form-group label { font-size: 0.85rem; color: var(--text-muted); }
+        
+        .form-input {
+            width: 100%;
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: #0f172a;
+            color: var(--text-main);
+            font-family: 'Inter', 'Cairo', sans-serif;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+        .form-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
+
+        .input-with-button { display: flex; gap: 8px; }
+        .input-with-button .form-input { flex: 1; }
+
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: 'Inter', 'Cairo', sans-serif;
+            font-weight: 600;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        .btn:hover { filter: brightness(1.1); }
+        .btn-danger { background: var(--danger); }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+        .btn-outline:hover { background: var(--border); color: white; }
+        .btn-small { padding: 4px 8px; font-size: 0.8rem; }
+
+        .form-actions { display: flex; gap: 10px; margin-top: 10px; }
+
+        /* Lists */
+        .item-list { display: flex; flex-direction: column; gap: 10px; }
+        .item-card {
+            background: var(--primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .item-info { flex: 1; overflow: hidden; }
+        .item-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 2px; }
+        .item-subtitle { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+        /* Settings specific */
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .status-success { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+        .status-error { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+
+        /* Toast Notifications */
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: var(--secondary);
+            border-left: 4px solid var(--accent);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 4px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            font-size: 0.9rem;
+            z-index: 1000;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.3s;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.success { border-color: var(--success); }
+        .toast.error { border-color: var(--danger); }
+
+        /* Logs Console */
+        .terminal {
+            background: #000;
+            border-radius: 6px;
+            padding: 15px;
+            height: calc(100vh - 260px);
+            min-height: 200px;
+            overflow-y: auto;
+            font-family: 'Consolas', 'Cascadia Mono', monospace;
+            font-size: 0.85rem;
+            direction: ltr;
+            text-align: left;
+            user-select: text;
+            -webkit-user-select: text;
+        }
+        .log-toolbar { flex-wrap: wrap; align-items: center; }
+        .log-plain-fallback {
+            display: none;
+            width: 100%;
+            min-height: 120px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 0.8rem;
+            background: #0f172a;
+            color: #e2e8f0;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            direction: ltr;
+            text-align: left;
+        }
+        .log-line { margin-bottom: 4px; border-bottom: 1px solid #111; padding-bottom: 2px; }
+        .log-time { color: #888; margin-right: 8px; }
+        .log-source-sp { color: #3b82f6; font-weight: bold; margin-right: 8px; }
+        .log-source-gd { color: #10b981; font-weight: bold; margin-right: 8px; }
+        .log-source-sys { color: #a78bfa; font-weight: bold; margin-right: 8px; }
+        .log-msg { color: #ddd; }
+        .log-msg.success { color: #34d399; }
+        .log-msg.error { color: #f87171; }
+        .log-msg.warning { color: #fbbf24; }
+
+        .entry-type-badge {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            background: rgba(59, 130, 246, 0.25);
+            color: #93c5fd;
+            vertical-align: middle;
+        }
+
+    </style>
+    <script defer src="{{ url_for('static', filename='js/ui_locale.js') }}"></script>
+</head>
+<body>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="brand" id="i18n-brand">🚀 Unified Sync</div>
+        
+        <div class="nav-item active" onclick="switchTab('sp-tab', this)">
+            <span>🌐</span> <span id="i18n-navSp">SharePoint</span>
+        </div>
+        <a href="/sp/explore" class="nav-item" style="text-decoration:none;color:inherit;display:flex;align-items:center;gap:10px;">
+            <span>🔎</span> <span id="i18n-navExplore">SharePoint explorer</span>
+        </a>
+        <div class="nav-item" onclick="switchTab('gd-tab', this)">
+            <span>📁</span> <span id="i18n-navGd">Google Drive</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('settings-tab', this)">
+            <span>⚙️</span> <span id="i18n-navSettings">Connection settings</span>
+        </div>
+        <div class="nav-item" onclick="switchTab('logs-tab', this)">
+            <span>📝</span> <span id="i18n-navLogs">Activity log</span>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <div class="header">
+            <div class="header-title" id="current-tab-title" data-tab-key="tabSpTitle">SharePoint</div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <button type="button" class="btn btn-outline btn-small" id="btn-lang-en" style="padding:6px 10px;font-size:0.8rem;">English</button>
+              <button type="button" class="btn btn-outline btn-small" id="btn-lang-ar" style="padding:6px 10px;font-size:0.8rem;">العربية</button>
+              <button class="btn-sync-all" onclick="syncAll()" id="btn-sync-all">
+                <span id="i18n-btnSyncAll">🔄 Sync all</span>
+              </button>
+            </div>
+        </div>
+
+        <div class="content-area">
+            {% if not sp_site_configured %}
+            <div class="card" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:16px;">
+                <div class="card-header" style="color:#fbbf24;">SharePoint site URL not configured</div>
+                <p style="font-size:0.9rem;color:var(--text-muted);line-height:1.55;">
+                    Set <code dir="ltr">sharepoint_site_url</code> in <code dir="ltr">config/app_settings.json</code> (copy from <code dir="ltr">config/app_settings.example.json</code>)
+                    or set the environment variable <code dir="ltr">SP_SYNC_SITE_URL</code> to your tenant root, for example
+                    <code dir="ltr">https://your-tenant-my.sharepoint.com/personal/user_domain_onmicrosoft_com</code>.
+                </p>
+            </div>
+            {% endif %}
+            <!-- SharePoint Tab -->
+            <div id="sp-tab" class="tab-content active">
+                <div class="card">
+                    <div class="card-header">➕ Add / edit SharePoint folder</div>
+                    <form id="sp-form" onsubmit="saveSPFolder(event)">
+                        <input type="hidden" id="sp-edit-index" value="-1">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Folder name (label)</label>
+                                <input type="text" class="form-input" id="sp-name" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Relative URL</label>
+                                <input type="text" class="form-input" id="sp-url" placeholder="/Shared Documents/Folder" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Local download path</label>
+                                <div class="input-with-button">
+                                    <input type="text" class="form-input" id="sp-path" required>
+                                    <button type="button" class="btn btn-outline" onclick="browseFolder('sp-path')">📂</button>
+                                </div>
+                            </div>
+                            <div class="form-group" style="grid-column: 1 / -1;" id="sp-local-flat-wrap">
+                                <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:0.88rem;color:var(--text-muted);">
+                                    <input type="checkbox" id="sp-local-flat" style="margin-top:4px;">
+                                    <span>Download directly into the path above without creating a subfolder named after the SharePoint folder (“flat” legacy mode).</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn" id="sp-submit-btn">Save folder</button>
+                            <button type="button" class="btn btn-outline" onclick="resetForm('sp')" style="display:none;" id="sp-cancel-btn">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">SharePoint explorer</div>
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px; line-height: 1.55;">
+                        Full sharing links (<code dir="ltr" style="font-size:0.8rem;">https://…/:f:/g/personal/…?e=…</code>)
+                        <strong>cannot</strong> be used directly as the relative URL field — the server must resolve them first.
+                        Open the <strong>explorer page</strong>, paste the link, browse folders/files, then add targets to sync.
+                    </p>
+                    <a href="/sp/explore" class="btn">Open SharePoint explorer</a>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">📁 Configured folders</div>
+                    <div class="item-list" id="sp-list">
+                        <!-- Loaded via JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Google Drive Tab -->
+            <div id="gd-tab" class="tab-content">
+                <div class="card">
+                    <div class="card-header">➕ Add / edit Google Drive folder</div>
+                    <form id="gd-form" onsubmit="saveGDFolder(event)">
+                        <input type="hidden" id="gd-edit-index" value="-1">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Folder link</label>
+                                <input type="text" class="form-input" id="gd-url" placeholder="https://drive.google.com/drive/folders/..." required oninput="autoFetchGDName()">
+                            </div>
+                            <div class="form-group">
+                                <label>Folder name</label>
+                                <input type="text" class="form-input" id="gd-name" required>
+                            </div>
+                            <div class="form-group">
+                                <label>Local download path</label>
+                                <div class="input-with-button">
+                                    <input type="text" class="form-input" id="gd-path" required>
+                                    <button type="button" class="btn btn-outline" onclick="browseFolder('gd-path')">📂</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn" id="gd-submit-btn">Save folder</button>
+                            <button type="button" class="btn btn-outline" onclick="resetForm('gd')" style="display:none;" id="gd-cancel-btn">Cancel</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">📁 Configured folders</div>
+                    <div class="item-list" id="gd-list">
+                        <!-- Loaded via JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div id="settings-tab" class="tab-content">
+                
+                <div class="card">
+                    <div class="card-header">🌐 SharePoint connection</div>
+                    <div style="margin-bottom: 15px;">
+                        {% if sp_auth %}
+                            <span class="status-badge status-success">✅ Connected (cookies look valid)</span>
+                        {% else %}
+                            <span class="status-badge status-error">❌ Not connected (update cookies)</span>
+                        {% endif %}
+                    </div>
+                    <form onsubmit="updateSPAuth(event)">
+                        <div class="form-group" style="margin-bottom: 10px;">
+                            <label>FedAuth Cookie</label>
+                            <input type="text" class="form-input" id="sp-fedauth" placeholder="Paste FedAuth value...">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 10px;">
+                            <label>rtFa Cookie</label>
+                            <input type="text" class="form-input" id="sp-rtfa" placeholder="Paste rtFa value...">
+                        </div>
+                        <button type="submit" class="btn">Update SharePoint connection (manual)</button>
+                    </form>
+                    
+                    <hr style="border: 0; border-top: 1px solid var(--border); margin: 15px 0;">
+                    
+                    <div style="margin-top: 15px;">
+                        <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 10px;">
+                            Or extract cookies automatically from Chrome/Edge if you are already signed in:
+                        </p>
+                        <button class="btn" style="background: var(--success);" onclick="autoExtractSPCookies()" id="btn-auto-cookies">
+                            🔄 Extract cookies from browser
+                        </button>
+                    </div>
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 12px;">
+                        Browser-based video capture requires Playwright Chromium once on this machine:
+                        <code style="background:#0f172a;padding:2px 6px;border-radius:4px;">python -m playwright install chromium</code>
+                    </p>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">📁 Google Drive connection</div>
+                    <div style="margin-bottom: 15px;">
+                        {% if gd_auth %}
+                            <span class="status-badge status-success">✅ Connected</span>
+                        {% else %}
+                            <span class="status-badge status-error">❌ Not connected (sign in required)</span>
+                        {% endif %}
+                    </div>
+                    <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 10px;">
+                        This flow opens a browser window to approve Drive read-only access.
+                    </p>
+                    <button class="btn" onclick="startGDAuth()">Sign in to Google Drive</button>
+                </div>
+            </div>
+
+            <!-- Logs Tab -->
+            <div id="logs-tab" class="tab-content">
+                <div class="card log-toolbar" style="margin-bottom: 10px; padding: 10px; display: flex; gap: 8px;">
+                    <button class="btn btn-small btn-outline" onclick="filterLogs('all')">All</button>
+                    <button class="btn btn-small btn-outline" onclick="filterLogs('sharepoint')">SharePoint</button>
+                    <button class="btn btn-small btn-outline" onclick="filterLogs('gdrive')">Google Drive</button>
+                    <span style="flex:1"></span>
+                    <button type="button" class="btn btn-small" onclick="copyAllLogs()" title="Copy log as plain text">📋 Copy log</button>
+                    <button type="button" class="btn btn-small btn-outline" onclick="showPlainLogs()" title="Show selectable plain text">📄 Plain text</button>
+                </div>
+                <div class="terminal" id="terminal">
+                    <!-- Logs will appear here -->
+                </div>
+                <textarea id="log-plain-fallback" class="log-plain-fallback" readonly placeholder="Plain log text appears here for manual selection"></textarea>
+            </div>
+
+        </div>
+    </div>
+
+    <div id="toast" class="toast">Done.</div>
+
+    <script>
+        let currentLogFilter = 'all';
+
+        // --- UI Navigation ---
+        function switchTab(tabId, element) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(tabId).classList.add('active');
+            element.classList.add('active');
+            
+            const tabKeys = {
+                'sp-tab': 'tabSpTitle',
+                'gd-tab': 'tabGdTitle',
+                'settings-tab': 'tabSettingsTitle',
+                'logs-tab': 'tabLogsTitle'
+            };
+            const title = document.getElementById('current-tab-title');
+            const key = tabKeys[tabId];
+            title.dataset.tabKey = key;
+            if (window.UI_LOCALE && window.UI_LOCALE.T) {
+                const lang = window.UI_LOCALE.getLang();
+                title.textContent = window.UI_LOCALE.T[lang][key] || window.UI_LOCALE.T.en[key];
+            } else {
+                const titles = { 'sp-tab': 'SharePoint', 'gd-tab': 'Google Drive', 'settings-tab': 'Connection settings', 'logs-tab': 'Activity log' };
+                title.textContent = titles[tabId];
+            }
+            if (window.UI_LOCALE) window.UI_LOCALE.apply();
+        }
+
+        function showToast(msg, isError = false) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.className = 'toast show ' + (isError ? 'error' : 'success');
+            setTimeout(() => { toast.classList.remove('show'); }, 3000);
+        }
+
+        async function browseFolder(inputId) {
+            try {
+                const res = await fetch('/api/browse_folder');
+                const data = await res.json();
+                if (data.path) {
+                    document.getElementById(inputId).value = data.path;
+                }
+            } catch (e) { console.error(e); }
+        }
+
+        // --- Data Fetching (AJAX) ---
+        async function fetchInitialData() {
+            try {
+                // To display lists, we can just fetch the HTML page again and parse, 
+                // BUT it is cleaner to fetch settings by fetching index.html or creating simple JSON endpoints.
+                // Since I must use AJAX without page reload, I will implement a quick reload strategy 
+                // just by fetching the page quietly and updating the lists.
+                const res = await fetch(location.href);
+                const text = await res.text();
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(text, 'text/html');
+                
+                // Replace Server-Side rendered lists (Wait, we don't have JSON endpoints for GET lists yet).
+                // I will dynamically render them on window load.
+            } catch (e) { console.error("Could not fetch data"); }
+        }
+
+        // --- SharePoint ---
+        const spFolders = {{ sp_folders|tojson|safe if sp_folders else '[]' }};
+
+        function renderSPList() {
+            const list = document.getElementById('sp-list');
+            list.innerHTML = '';
+            spFolders.forEach((f, idx) => {
+                const el = document.createElement('div'); el.className = 'item-card';
+                const badge =
+                    (f.entry_type === 'file')
+                        ? '<span class="entry-type-badge">File</span>'
+                        : (f.local_flat ? '<span class="entry-type-badge">Flat</span>' : '');
+                el.innerHTML = `
+                    <div class="item-info">
+                        <div class="item-title">${badge}${escapeHtml(f.name)}</div>
+                        <div class="item-subtitle">${escapeHtml(f.rel_url)} ➔ ${escapeHtml(f.local_path)}</div>
+                    </div>
+                    <div class="item-actions">
+                        <button class="btn btn-small btn-outline" onclick="editSP(${idx})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteSP(${idx})">🗑️</button>
+                    </div>
+                `;
+                list.appendChild(el);
+            });
+        }
+
+        function editSP(idx) {
+            const f = spFolders[idx];
+            document.getElementById('sp-name').value = f.name;
+            document.getElementById('sp-url').value = f.rel_url;
+            document.getElementById('sp-path').value = f.local_path;
+            document.getElementById('sp-edit-index').value = idx;
+            document.getElementById('sp-submit-btn').textContent = 'Save changes';
+            document.getElementById('sp-cancel-btn').style.display = 'inline-block';
+            const flatWrap = document.getElementById('sp-local-flat-wrap');
+            const flatCb = document.getElementById('sp-local-flat');
+            if (f.entry_type === 'file') {
+                flatWrap.style.display = 'none';
+            } else {
+                flatWrap.style.display = '';
+                flatCb.checked = !!f.local_flat;
+            }
+        }
+
+        async function saveSPFolder(e) {
+            e.preventDefault();
+            const idx = parseInt(document.getElementById('sp-edit-index').value);
+            const entry_type =
+                (idx >= 0 && spFolders[idx].entry_type === 'file') ? 'file' : 'folder';
+            const data = {
+                name: document.getElementById('sp-name').value,
+                rel_url: document.getElementById('sp-url').value,
+                local_path: document.getElementById('sp-path').value,
+                entry_type,
+            };
+            if (entry_type === 'folder') {
+                data.local_flat = document.getElementById('sp-local-flat').checked;
+            }
+            
+            try {
+                let res;
+                if(idx >= 0) {
+                    data.index = idx;
+                    res = await fetch('/sp/update_folder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+                    if(res.ok) { spFolders[idx] = data; }
+                } else {
+                    res = await fetch('/sp/add_folder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+                    if(res.ok) { spFolders.push(data); }
+                }
+                if(res.ok) {
+                    renderSPList();
+                    resetForm('sp');
+                    showToast('SharePoint folder saved');
+                } else {
+                    const err = await res.json();
+                    showToast(err.error || 'Error', true);
+                }
+            } catch(e) { showToast('Error', true); }
+        }
+
+        async function deleteSP(idx) {
+            if(!confirm('Delete this item?')) return;
+            try {
+                const res = await fetch('/sp/remove_folder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: idx}) });
+                if(res.ok) {
+                    spFolders.splice(idx, 1);
+                    renderSPList();
+                    showToast('Deleted');
+                }
+            } catch(e) { showToast('Delete failed', true); }
+        }
+
+        // --- Google Drive ---
+        const gdFolders = {{ gd_folders|tojson|safe if gd_folders else '[]' }};
+        function renderGDList() {
+            const list = document.getElementById('gd-list');
+            list.innerHTML = '';
+            gdFolders.forEach((f, idx) => {
+                const el = document.createElement('div'); el.className = 'item-card';
+                el.innerHTML = `
+                    <div class="item-info">
+                        <div class="item-title">${f.name}</div>
+                        <div class="item-subtitle">${f.local_path}</div>
+                    </div>
+                    <div class="item-actions">
+                        <button class="btn btn-small btn-outline" onclick="editGD(${idx})">✏️</button>
+                        <button class="btn btn-small btn-danger" onclick="deleteGD(${idx})">🗑️</button>
+                    </div>
+                `;
+                list.appendChild(el);
+            });
+        }
+
+        function editGD(idx) {
+            const f = gdFolders[idx];
+            document.getElementById('gd-name').value = f.name;
+            document.getElementById('gd-url').value = f.folder_url;
+            document.getElementById('gd-path').value = f.local_path;
+            document.getElementById('gd-edit-index').value = idx;
+            document.getElementById('gd-submit-btn').textContent = 'Save changes';
+            document.getElementById('gd-cancel-btn').style.display = 'inline-block';
+        }
+
+        async function saveGDFolder(e) {
+            e.preventDefault();
+            const data = {
+                name: document.getElementById('gd-name').value,
+                folder_url: document.getElementById('gd-url').value,
+                local_path: document.getElementById('gd-path').value
+            };
+            const idx = parseInt(document.getElementById('gd-edit-index').value);
+            
+            try {
+                let res;
+                if(idx >= 0) {
+                    data.index = idx;
+                    res = await fetch('/gdrive/update_folder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+                    if(res.ok) { gdFolders[idx] = data; }
+                } else {
+                    res = await fetch('/gdrive/add_folder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+                    if(res.ok) { gdFolders.push(data); }
+                }
+                if(res.ok) {
+                    renderGDList();
+                    resetForm('gd');
+                    showToast('Google Drive folder saved');
+                } else {
+                    const err = await res.json();
+                    showToast(err.error || 'Error', true);
+                }
+            } catch(e) { showToast('Error', true); }
+        }
+
+        async function deleteGD(idx) {
+            if(!confirm('Delete this item?')) return;
+            try {
+                const res = await fetch('/gdrive/remove_folder', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({index: idx}) });
+                if(res.ok) {
+                    gdFolders.splice(idx, 1);
+                    renderGDList();
+                    showToast('Deleted');
+                }
+            } catch(e) { showToast('Delete failed', true); }
+        }
+
+        async function autoFetchGDName() {
+            const url = document.getElementById('gd-url').value.trim();
+            const nameField = document.getElementById('gd-name');
+            const pathField = document.getElementById('gd-path');
+            
+            if (url.includes('drive.google.com') && nameField.value.trim() === '') {
+                nameField.placeholder = "Fetching name...";
+                try {
+                    const res = await fetch('/gdrive/get_folder_info', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({folder_url: url})
+                    });
+                    const data = await res.json();
+                    if (data.success && data.name) {
+                        nameField.value = data.name;
+                        // Append to local path automatically
+                        let currentPath = pathField.value.trim();
+                        if (currentPath && !currentPath.endsWith(data.name)) {
+                            if (!currentPath.endsWith('\\') && !currentPath.endsWith('/')) {
+                                currentPath += '\\';
+                            }
+                            pathField.value = currentPath + data.name;
+                        }
+                    }
+                } catch (e) { console.error(e); }
+                nameField.placeholder = "";
+            }
+        }
+
+        function resetForm(type) {
+            document.getElementById(`${type}-form`).reset();
+            document.getElementById(`${type}-edit-index`).value = '-1';
+            document.getElementById(`${type}-submit-btn`).textContent = 'Save folder';
+            document.getElementById(`${type}-cancel-btn`).style.display = 'none';
+            if (type === 'sp') {
+                const w = document.getElementById('sp-local-flat-wrap');
+                if (w) w.style.display = '';
+            }
+        }
+
+        // --- Settings / Sync ---
+        async function updateSPAuth(e) {
+            e.preventDefault();
+            const fed = document.getElementById('sp-fedauth').value;
+            const rtfa = document.getElementById('sp-rtfa').value;
+            try {
+                const res = await fetch('/sp/save_cookies', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({fedauth: fed, rtfa: rtfa})
+                });
+                const data = await res.json();
+                if(data.success) {
+                    showToast('SharePoint connection updated');
+                    setTimeout(()=> location.reload(), 1500);
+                } else {
+                    showToast(data.error || 'Update failed', true);
+                }
+            } catch(e) { showToast('Network error', true); }
+        }
+
+        async function autoExtractSPCookies() {
+            const btn = document.getElementById('btn-auto-cookies');
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Extracting cookies...';
+            try {
+                const res = await fetch('/sp/auto_cookies', { method: 'POST' });
+                const data = await res.json();
+                if(data.success) {
+                    showToast(`Cookies extracted from ${data.source}`);
+                    setTimeout(()=> location.reload(), 2000);
+                } else {
+                    showToast(data.error || 'Extraction failed — sign in to the browser first', true);
+                    btn.disabled = false;
+                    btn.innerHTML = '🔄 Extract cookies from browser';
+                }
+            } catch(e) {
+                showToast('Server connection error', true);
+                btn.disabled = false;
+                btn.innerHTML = '🔄 Extract cookies from browser';
+            }
+        }
+
+        function startGDAuth() {
+            window.location.href = '/gdrive/auth';
+        }
+
+        async function syncAll() {
+            showToast('Starting full sync...');
+            document.getElementById('btn-sync-all').disabled = true;
+            try {
+                const res = await fetch('/sync/all', { method: 'POST' });
+                const data = await res.json();
+                if(data.success) {
+                    showToast('Sync started in background');
+                    switchTab('logs-tab', document.querySelectorAll('.nav-item')[3]);
+                } else {
+                    showToast(data.error || 'Unexpected error', true);
+                }
+            } catch (e) {
+                showToast('Could not reach server', true);
+            }
+            setTimeout(()=> document.getElementById('btn-sync-all').disabled = false, 3000);
+        }
+
+        // --- Logs ---
+        function escapeHtml(s) {
+            if (s == null) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function filterLogs(source) {
+            currentLogFilter = source;
+            document.getElementById('log-plain-fallback').style.display = 'none';
+            refreshLogs();
+        }
+
+        function formatLogContent(log) {
+            let colorClass = '';
+            if (log.msg.includes('✅')) colorClass = 'success';
+            if (log.msg.includes('❌')) colorClass = 'error';
+            if (log.msg.includes('⚠️')) colorClass = 'warning';
+            
+            let srcClass = 'log-source-gd';
+            let srcLabel = '[GD]';
+            if (log.source === 'sharepoint') {
+                srcClass = 'log-source-sp';
+                srcLabel = '[SP]';
+            } else if (log.source === 'system') {
+                srcClass = 'log-source-sys';
+                srcLabel = '[SYS]';
+            }
+            const safeMsg = escapeHtml(log.msg);
+            
+            return `
+                <div class="log-line">
+                    <span class="log-time">${escapeHtml(log.time.split(' ')[1])}</span>
+                    <span class="${srcClass}">${srcLabel}</span>
+                    <span class="log-msg ${colorClass}">${safeMsg}</span>
+                </div>
+            `;
+        }
+
+        async function copyAllLogs() {
+            try {
+                const res = await fetch('/logs/text?source=' + encodeURIComponent(currentLogFilter));
+                const t = await res.text();
+                try {
+                    await navigator.clipboard.writeText(t);
+                    showToast('Log copied to clipboard');
+                } catch (clipErr) {
+                    const ta = document.getElementById('log-plain-fallback');
+                    ta.value = t;
+                    ta.style.display = 'block';
+                    ta.focus();
+                    ta.select();
+                    showToast('Text selected — press Ctrl+C to copy');
+                }
+            } catch (e) {
+                showToast('Could not load log', true);
+            }
+        }
+
+        function showPlainLogs() {
+            fetch('/logs/text?source=' + encodeURIComponent(currentLogFilter))
+                .then((r) => r.text())
+                .then((t) => {
+                    const ta = document.getElementById('log-plain-fallback');
+                    ta.value = t;
+                    ta.style.display = 'block';
+                    ta.focus();
+                    showToast('Ctrl+A then Ctrl+C to copy');
+                })
+                .catch(() => showToast('Could not load log', true));
+        }
+
+        async function refreshLogs() {
+            try {
+                const rs = await fetch('/logs?source=' + currentLogFilter);
+                const items = await rs.json();
+                const term = document.getElementById('terminal');
+                const atBottom = term.scrollHeight - term.scrollTop <= term.clientHeight + 40;
+                
+                term.innerHTML = items.map(formatLogContent).join('');
+                
+                if(atBottom) {
+                    term.scrollTop = term.scrollHeight;
+                }
+            } catch(e) {}
+        }
+
+        // Initialize lists and polling
+        renderSPList();
+        renderGDList();
+        setInterval(refreshLogs, 2000);
+        refreshLogs();
+
+    </script>
+</body>
+</html>

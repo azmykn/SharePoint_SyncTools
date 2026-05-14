@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+sp_env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Local app database (configs, cookies, OAuth token, logs)
+data/
+
+# Test DB scratch files
+data/.test_app.sqlite
+data/.test_cookies.sqlite
+
+# Secrets and local state (never commit)
+.sp_cookies
+.secure_credentials.dat
+.secure_credentials.*
+.storage_key
+credentials.json
+.gdrive_token.json
+.gdrive_config.json
+.sp_config.json
+config/app_settings.json
+.sp_guest_link
+sync_log.txt
+sharepoint_analysis.json
+
+# Playwright
+.playwright/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+.tmp_segments/

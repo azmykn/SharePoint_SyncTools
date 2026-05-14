@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SharePoint explorer</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #0f172a;
+            --secondary: #1e293b;
+            --accent: #3b82f6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+            background: var(--primary);
+            color: var(--text-main);
+            min-height: 100vh;
+        }
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.95);
+        }
+        .topbar a { color: var(--accent); text-decoration: none; font-weight: 600; }
+        .topbar a:hover { text-decoration: underline; }
+        .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
+        .card {
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .card-header { font-size: 1.1rem; font-weight: 700; color: var(--accent); margin-bottom: 12px; }
+        .muted { font-size: 0.86rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 12px; }
+        .form-group { margin-bottom: 12px; }
+        .form-group label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px; }
+        .form-input {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: #0f172a;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+        .form-input:focus { outline: none; border-color: var(--accent); }
+        .input-row { display: flex; gap: 8px; align-items: stretch; }
+        .input-row .form-input { flex: 1; }
+        .btn {
+            background: var(--accent);
+            color: white;
+            border: none;
+            padding: 10px 18px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .btn:hover { filter: brightness(1.08); }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+        .btn-success { background: var(--success); }
+        .btn-small { padding: 6px 10px; font-size: 0.8rem; }
+        .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; }
+        .badge-warn { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
+        .badge-ok { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+        .explore-bc { font-size: 0.8rem; color: var(--text-muted); margin: 10px 0; word-break: break-all; line-height: 1.4; }
+        .explore-table-wrap { overflow-x: auto; margin-top: 10px; }
+        .explore-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+        .explore-table th, .explore-table td {
+            border: 1px solid var(--border);
+            padding: 6px 8px;
+            text-align: left;
+        }
+        .explore-table th { background: rgba(15, 23, 42, 0.9); color: var(--text-muted); }
+        .explore-kind { font-size: 0.75rem; color: var(--text-muted); }
+        .toast {
+            position: fixed; bottom: 20px; right: 20px;
+            background: var(--secondary); border-left: 4px solid var(--accent);
+            color: white; padding: 12px 18px; border-radius: 6px;
+            opacity: 0; transform: translateY(12px); transition: 0.25s; z-index: 1000;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.err { border-color: var(--danger); }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <span style="font-weight:700;">SharePoint explorer</span>
+        <a href="{{ url_for('index') }}">← Back to dashboard</a>
+    </div>
+    <div class="wrap">
+        {% if not sp_auth %}
+        <p class="badge badge-warn">Not connected: save FedAuth and rtFa in the Connection settings tab first.</p>
+        {% else %}
+        <p class="badge badge-ok">Cookie session ready for browsing</p>
+        {% endif %}
+
+        <div class="card">
+            <div class="card-header">1) Paste a sharing link or path</div>
+            <p class="muted">
+                Paste the full link from the browser (for example <code>https://…sharepoint.com/:f:/g/personal/…?e=…</code>)
+                then click <strong>Resolve link</strong>. It will be converted to a relative path and folders/files will load.
+                You can also paste a relative path starting with <code>/personal/…</code> directly.
+            </p>
+            <div class="form-group">
+                <label>Full link or relative path</label>
+                <textarea class="form-input" id="spx-paste" rows="3" placeholder="https://… or /personal/…"></textarea>
+            </div>
+            <div class="actions">
+                <button type="button" class="btn" id="spx-resolve" {% if not sp_auth %}disabled{% endif %}>Resolve link</button>
+            </div>
+            <p class="muted" id="spx-resolve-meta" style="margin-top:10px;display:none;"></p>
+        </div>
+
+        <div class="card">
+            <div class="card-header">2) Current folder and local paths</div>
+            <div class="form-group">
+                <label>Current folder (relative URL) — filled automatically after resolving</label>
+                <input type="text" class="form-input" id="spx-parent" placeholder="/personal/..." value="{{ sp_path_hint|e }}">
+            </div>
+            <div class="form-group">
+                <label>Suggested local root (prefix for paths in the table)</label>
+                <div class="input-row">
+                    <input type="text" class="form-input" id="spx-local-root" placeholder="e.g. D:/Downloads/SP">
+                    <button type="button" class="btn btn-outline btn-small" onclick="browseFolder('spx-local-root')">📂</button>
+                </div>
+            </div>
+            <div class="actions">
+                <button type="button" class="btn" id="spx-browse" {% if not sp_auth %}disabled{% endif %}>Browse</button>
+                <button type="button" class="btn btn-outline" id="spx-back">Back</button>
+                <button type="button" class="btn btn-success" id="spx-bulk">Add selected to sync</button>
+            </div>
+            <div id="spx-bc" class="explore-bc"></div>
+            <div class="explore-table-wrap" id="spx-results"></div>
+        </div>
+    </div>
+    <div id="toast" class="toast"></div>
+
+    <script>
+        let exploreHistory = [];
+        /** Last resolved browser URL — sent as prime_url so /sp/browse can warm cookies like resolve. */
+        let sessionPrimeUrl = '';
+
+        function showToast(msg, isErr) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.className = 'toast show' + (isErr ? ' err' : '');
+            setTimeout(() => t.classList.remove('show'), 3500);
+        }
+
+        async function browseFolder(inputId) {
+            try {
+                const res = await fetch('/api/browse_folder');
+                const data = await res.json();
+                if (data.path) document.getElementById(inputId).value = data.path;
+            } catch (e) { console.error(e); }
+        }
+
+        function localJoinPath(root, name) {
+            const r = (root || '').trim();
+            if (!r) return name;
+            const sep = r.includes('\\') ? '\\' : '/';
+            return r.replace(/[\\/]+$/, '') + sep + name;
+        }
+
+        document.getElementById('spx-resolve').addEventListener('click', async () => {
+            const raw = document.getElementById('spx-paste').value.trim();
+            if (!raw) { showToast('Paste a link first', true); return; }
+            const meta = document.getElementById('spx-resolve-meta');
+            meta.style.display = 'block';
+            meta.textContent = '⏳ Resolving link…';
+            try {
+                const res = await fetch('/sp/resolve_url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: raw }),
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    meta.textContent = (data.error || 'Failed') + (data.hint ? ' — ' + data.hint : '');
+                    showToast(data.error || 'Could not resolve link', true);
+                    return;
+                }
+                document.getElementById('spx-parent').value = data.browse_parent || '';
+                exploreHistory = [];
+                sessionPrimeUrl = (data.final_url || '').trim();
+                meta.textContent = 'Done: ' + (data.resolved_from || '') + (data.final_url ? ' ← ' + data.final_url : '');
+                showToast('Link resolved — loading browse');
+                exploreRun();
+            } catch (e) {
+                meta.textContent = 'Connection error';
+                showToast('Connection error', true);
+            }
+        });
+
+        function exploreRun() {
+            const parentInput = document.getElementById('spx-parent');
+            let parent = (parentInput.value || '').trim();
+            if (!parent.startsWith('/')) parent = '/' + parent;
+            parentInput.value = parent;
+            const bc = document.getElementById('spx-bc');
+            bc.textContent = exploreHistory.length
+                ? exploreHistory.map((h) => h.name || h.rel_url).join(' / ') + ' / '
+                : '';
+            const browsePayload = { parent_rel_url: parent };
+            if (sessionPrimeUrl) browsePayload.prime_url = sessionPrimeUrl;
+            fetch('/sp/browse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(browsePayload),
+            })
+                .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })))
+                .then(({ ok, data }) => {
+                    if (!ok || !data.success) {
+                        showToast(data.error || 'Browse failed', true);
+                        document.getElementById('spx-results').innerHTML = '';
+                        return;
+                    }
+                    exploreRenderTable(data);
+                })
+                .catch(() => showToast('Connection error', true));
+        }
+
+        function exploreRenderTable(data) {
+            const wrap = document.getElementById('spx-results');
+            const root = document.getElementById('spx-local-root').value.trim();
+            const folders = data.folders || [];
+            const files = data.files || [];
+            if (!folders.length && !files.length) {
+                wrap.innerHTML = '<p class="muted" style="margin-top:10px;">This folder is empty.</p>';
+                return;
+            }
+            const table = document.createElement('table');
+            table.className = 'explore-table';
+            const thead = document.createElement('thead');
+            thead.innerHTML = '<tr><th></th><th>Type</th><th>Name</th><th>Local path</th><th></th></tr>';
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+
+            folders.forEach((fo) => {
+                const tr = document.createElement('tr');
+                tr.className = 'ex-row-folder';
+                tr.dataset.relUrl = fo.rel_url;
+                tr.dataset.name = fo.name;
+                const td0 = document.createElement('td');
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'ex-pick ex-folder-check';
+                td0.appendChild(cb);
+                tr.appendChild(td0);
+                const tdKind = document.createElement('td');
+                tdKind.className = 'explore-kind';
+                tdKind.textContent = 'Folder';
+                tr.appendChild(tdKind);
+                const tdName = document.createElement('td');
+                tdName.textContent = fo.name;
+                tr.appendChild(tdName);
+                const tdPath = document.createElement('td');
+                const inp = document.createElement('input');
+                inp.type = 'text';
+                inp.className = 'form-input ex-local-path';
+                inp.value = localJoinPath(root, fo.name);
+                tdPath.appendChild(inp);
+                tr.appendChild(tdPath);
+                const tdBtn = document.createElement('td');
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-outline btn-small';
+                btn.textContent = 'Open';
+                btn.addEventListener('click', () => {
+                    const cur = document.getElementById('spx-parent').value.trim();
+                    exploreHistory.push({ rel_url: cur, name: fo.name || fo.rel_url });
+                    document.getElementById('spx-parent').value = fo.rel_url;
+                    exploreRun();
+                });
+                tdBtn.appendChild(btn);
+                tr.appendChild(tdBtn);
+                tbody.appendChild(tr);
+            });
+
+            files.forEach((fi) => {
+                const tr = document.createElement('tr');
+                tr.className = 'ex-row-file';
+                tr.dataset.relUrl = fi.rel_url;
+                tr.dataset.name = fi.name;
+                const td0 = document.createElement('td');
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.className = 'ex-pick ex-file-check';
+                td0.appendChild(cb);
+                tr.appendChild(td0);
+                const tdKind = document.createElement('td');
+                tdKind.className = 'explore-kind';
+                const mb = fi.size != null ? (Number(fi.size) / 1024 / 1024).toFixed(2) + ' MB' : '—';
+                tdKind.textContent = 'File (' + mb + ')';
+                tr.appendChild(tdKind);
+                const tdName = document.createElement('td');
+                tdName.textContent = fi.name;
+                tr.appendChild(tdName);
+                const tdPath = document.createElement('td');
+                const inp = document.createElement('input');
+                inp.type = 'text';
+                inp.className = 'form-input ex-local-path';
+                inp.value = localJoinPath(root, fi.name);
+                tdPath.appendChild(inp);
+                tr.appendChild(tdPath);
+                tr.appendChild(document.createElement('td'));
+                tbody.appendChild(tr);
+            });
+
+            table.appendChild(tbody);
+            wrap.innerHTML = '';
+            wrap.appendChild(table);
+        }
+
+        document.getElementById('spx-back').addEventListener('click', () => {
+            if (!exploreHistory.length) return;
+            const prev = exploreHistory.pop();
+            document.getElementById('spx-parent').value = prev.rel_url;
+            exploreRun();
+        });
+
+        document.getElementById('spx-browse').addEventListener('click', exploreRun);
+
+        document.getElementById('spx-bulk').addEventListener('click', () => {
+            const items = [];
+            document.querySelectorAll('.ex-row-folder').forEach((row) => {
+                const cb = row.querySelector('.ex-folder-check');
+                if (!cb || !cb.checked) return;
+                const rel = row.dataset.relUrl;
+                const name = row.dataset.name;
+                const local_path = row.querySelector('.ex-local-path')?.value?.trim();
+                if (rel && local_path) items.push({ name, rel_url: rel, local_path, entry_type: 'folder' });
+            });
+            document.querySelectorAll('.ex-row-file').forEach((row) => {
+                const cb = row.querySelector('.ex-file-check');
+                if (!cb || !cb.checked) return;
+                const rel = row.dataset.relUrl;
+                const name = row.dataset.name;
+                const local_path = row.querySelector('.ex-local-path')?.value?.trim();
+                if (rel && local_path) items.push({ name, rel_url: rel, local_path, entry_type: 'file' });
+            });
+            if (!items.length) {
+                showToast('Select at least one row', true);
+                return;
+            }
+            fetch('/sp/bulk_add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ items }),
+            })
+                .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })))
+                .then(({ ok, data }) => {
+                    if (!ok || !data.success) {
+                        showToast(data.error || 'Save failed', true);
+                        return;
+                    }
+                    showToast('Merged ' + data.merged + ' item(s) — reloading');
+                    setTimeout(() => { window.location.href = '/'; }, 900);
+                })
+                .catch(() => showToast('Connection error', true));
+        });
+    </script>
+</body>
+</html>

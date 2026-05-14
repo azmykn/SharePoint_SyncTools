@@ -1,0 +1,6 @@
+{
+  "_comment": "Copy this file to config/app_settings.json and adjust. Never commit app_settings.json if it contains secrets.",
+  "database_path": "data/app.sqlite",
+  "sharepoint_site_url": "https://YOUR-TENANT-my.sharepoint.com/personal/YOUR_USER",
+  "default_guest_share_link": ""
+}

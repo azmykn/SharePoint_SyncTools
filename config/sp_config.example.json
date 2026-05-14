@@ -1,0 +1,9 @@
+[
+  {
+    "name": "Example folder (rename me)",
+    "rel_url": "/personal/your_tenant_onmicrosoft_com/Documents/Shared path/to/folder",
+    "local_path": "C:\\Users\\You\\Downloads\\SharePointMirror",
+    "entry_type": "folder",
+    "local_flat": false
+  }
+]
