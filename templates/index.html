@@ -334,11 +334,11 @@
         <div class="content-area">
             {% if not sp_site_configured %}
             <div class="card" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:16px;">
-                <div class="card-header" style="color:#fbbf24;">SharePoint site URL not configured</div>
+                <div class="card-header" style="color:#fbbf24;">SharePoint site URL not set yet</div>
                 <p style="font-size:0.9rem;color:var(--text-muted);line-height:1.55;">
-                    Set <code dir="ltr">sharepoint_site_url</code> in <code dir="ltr">config/app_settings.json</code> (copy from <code dir="ltr">config/app_settings.example.json</code>)
-                    or set the environment variable <code dir="ltr">SP_SYNC_SITE_URL</code> to your tenant root, for example
-                    <code dir="ltr">https://your-tenant-my.sharepoint.com/personal/user_domain_onmicrosoft_com</code>.
+                    The app stores your SharePoint <strong>site root</strong> in its local database when you paste a full
+                    <code dir="ltr">https://…sharepoint.com/…</code> link in <strong>SharePoint explorer</strong> (auto-detect).
+                    You can also paste the site root manually under <strong>Connection settings</strong> and click <em>Save site URL</em>.
                 </p>
             </div>
             {% endif %}
@@ -446,6 +446,28 @@
                             <span class="status-badge status-error">❌ Not connected (update cookies)</span>
                         {% endif %}
                     </div>
+
+                    <div style="background: rgba(15,23,42,0.35); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+                        <div class="card-header" style="font-size:1rem;">SharePoint site URL (stored in this app)</div>
+                        <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 12px; line-height: 1.55;">
+                            Paste a full <code dir="ltr">https://…sharepoint.com/…</code> link once in <strong>SharePoint explorer</strong>
+                            — the site root is detected and saved automatically — or enter it manually below.
+                        </p>
+                        {% if sp_site_url_display %}
+                        <p style="font-size: 0.9rem; margin-bottom: 10px;"><strong>Current:</strong>
+                            <code dir="ltr" style="font-size:0.85rem;">{{ sp_site_url_display }}</code></p>
+                        {% endif %}
+                        <form onsubmit="saveSpSiteUrl(event)">
+                            <div class="form-group" style="margin-bottom: 10px;">
+                                <label>Site root URL</label>
+                                <input type="text" class="form-input" id="sp-site-url-manual" dir="ltr"
+                                    placeholder="https://tenant-my.sharepoint.com/personal/user_tenant_onmicrosoft_com"
+                                    value="{{ sp_site_url_display }}">
+                            </div>
+                            <button type="submit" class="btn btn-outline">Save site URL</button>
+                        </form>
+                    </div>
+
                     <form onsubmit="updateSPAuth(event)">
                         <div class="form-group" style="margin-bottom: 10px;">
                             <label>FedAuth Cookie</label>
@@ -800,6 +822,27 @@
                     showToast(data.error || 'Update failed', true);
                 }
             } catch(e) { showToast('Network error', true); }
+        }
+
+        async function saveSpSiteUrl(e) {
+            e.preventDefault();
+            const site_url = document.getElementById('sp-site-url-manual').value.trim();
+            try {
+                const res = await fetch('/sp/save_site_url', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ site_url }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Site URL saved');
+                    setTimeout(() => location.reload(), 800);
+                } else {
+                    showToast(data.error || 'Save failed', true);
+                }
+            } catch (err) {
+                showToast('Network error', true);
+            }
         }
 
         async function autoExtractSPCookies() {

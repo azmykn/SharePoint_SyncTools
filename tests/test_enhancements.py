@@ -128,6 +128,34 @@ def test_retry_mechanism():
         return False
 
 
+def test_sharepoint_site_url_in_store():
+    """SharePoint site root is persisted in SQLite and read by sync_engine.get_sp_site_url."""
+    print("\nSharePoint site URL (SQLite) test...")
+
+    try:
+        from sp_sync.db.store import get_store
+        from sp_sync.sharepoint.sync_engine import get_sp_site_url
+
+        store = get_store()
+        store.set_sharepoint_site_url("")
+        if get_sp_site_url() != "":
+            print("   Expected empty get_sp_site_url after clear")
+            return False
+
+        url = "https://contoso-my.sharepoint.com/personal/user_contoso_onmicrosoft_com"
+        store.set_sharepoint_site_url(url)
+        got = get_sp_site_url()
+        if got != url.rstrip("/"):
+            print(f"   Mismatch: expected {url!r}, got {got!r}")
+            return False
+        print("   get_sp_site_url() reads from SQLite store")
+        store.set_sharepoint_site_url("")
+        return True
+    except Exception as e:
+        print(f"   Error: {e}")
+        return False
+
+
 def test_config_from_store():
     """Test validate_and_fix_configs against SQLite."""
     print("\nConfigs from SQLite test...")
@@ -163,6 +191,7 @@ def main():
 
     tests = [
         test_sqlite_store,
+        test_sharepoint_site_url_in_store,
         test_config_validation,
         test_retry_mechanism,
         test_config_from_store,

@@ -2,7 +2,7 @@
 
 Copyright (c) 2026 Azmy KN <azmykn@gmail.com>
 SPDX-License-Identifier: MIT
-git@github.com:azmykn/SharePoint_SyncTools.git
+https://github.com/azmykn/SharePoint_SyncTools
 """
 
 import os

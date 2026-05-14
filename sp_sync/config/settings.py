@@ -12,8 +12,6 @@ from sp_sync.paths import project_root
 DEFAULTS: dict[str, Any] = {
     # Relative to project root, or absolute path
     "database_path": "data/app.sqlite",
-    # OneDrive/SharePoint site root (personal site URL). Must be set for sync.
-    "sharepoint_site_url": "",
     # Optional default guest/share link used before REST (Playwright seed)
     "default_guest_share_link": "",
 }
@@ -30,7 +28,7 @@ def load_settings() -> dict[str, Any]:
                 data = json.load(f)
             if isinstance(data, dict):
                 for k, v in data.items():
-                    if k in DEFAULTS or k in ("database_path", "sharepoint_site_url", "default_guest_share_link"):
+                    if k in DEFAULTS or k in ("database_path", "default_guest_share_link"):
                         merged[k] = v
         except (OSError, json.JSONDecodeError):
             pass
@@ -38,9 +36,6 @@ def load_settings() -> dict[str, Any]:
     db_env = os.environ.get("SP_SYNC_DB_PATH", "").strip()
     if db_env:
         merged["database_path"] = db_env
-    site_env = os.environ.get("SP_SYNC_SITE_URL", "").strip()
-    if site_env:
-        merged["sharepoint_site_url"] = site_env
     guest_env = os.environ.get("SP_GUEST_LINK", "").strip()
     if guest_env:
         merged["default_guest_share_link"] = guest_env
@@ -61,10 +56,6 @@ def database_file_path() -> str:
     if parent:
         os.makedirs(parent, exist_ok=True)
     return os.path.abspath(path)
-
-
-def sharepoint_site_url() -> str:
-    return (load_settings().get("sharepoint_site_url") or "").strip()
 
 
 def default_guest_share_link() -> str:

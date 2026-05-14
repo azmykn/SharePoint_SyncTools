@@ -42,17 +42,17 @@ The code also probes common paths such as `/usr/bin/chromium` when the variable 
 ## Configuration (clear paths)
 
 1. **Copy** `config/app_settings.example.json` → `config/app_settings.json` (the latter is gitignored).
-2. Set at least:
-   - **`sharepoint_site_url`** — tenant site root, e.g. `https://your-tenant-my.sharepoint.com/personal/user_tenant_onmicrosoft_com`
-   - **`database_path`** (optional) — SQLite file; default is `data/app.sqlite` under the project root
-   - **`default_guest_share_link`** (optional) — guest/share URL used to warm the browser session before REST
+2. Optional keys in `app_settings.json`:
+   - **`database_path`** — SQLite file; default is `data/app.sqlite` under the project root
+   - **`default_guest_share_link`** — guest/share URL used to warm the browser session before REST (optional)
+
+**SharePoint site root URL** is **not** read from this file. It is saved in SQLite when you paste a full `https://…sharepoint.com/…` link in **SharePoint explorer** (auto-detect) or when you use **Connection settings → Save site URL** in the web UI.
 
 **Environment overrides** (highest priority for some keys):
 
 | Variable | Purpose |
 |----------|---------|
 | `SP_SYNC_DB_PATH` | Full path to SQLite (overrides `database_path` in JSON) |
-| `SP_SYNC_SITE_URL` | SharePoint site root (overrides `sharepoint_site_url`) |
 | `SP_GUEST_LINK` | Guest/share link (overrides stored guest link) |
 
 ## Sensitive data — safe to publish on GitHub?
@@ -61,7 +61,7 @@ The code also probes common paths such as `/usr/bin/chromium` when the variable 
 
 - `data/` (SQLite: cookies, OAuth token, configs, activity log)
 - `credentials.json` (Google OAuth client secret JSON from Google Cloud Console)
-- `config/app_settings.json` (your tenant URLs and paths)
+- `config/app_settings.json` (optional: database path and guest link; do not commit secrets)
 - Any real cookies, tokens, guest links, or personal folder paths
 
 The codebase should contain **only examples** (`*.example.json`, placeholders in `tools/sharepoint_analyze.py`). Before pushing, run `git status` and confirm none of the above are tracked.
@@ -76,7 +76,7 @@ From the project root:
 python app.py
 ```
 
-Open `http://127.0.0.1:5000`. Save SharePoint cookies under **Connection settings**, add folder targets, then sync.
+Open `http://127.0.0.1:5000`. Save SharePoint cookies under **Connection settings**, set or auto-detect the **SharePoint site URL**, add folder targets, then sync.
 
 ### Google Drive CLI login (optional)
 
@@ -113,7 +113,7 @@ python tests/test_cookies.py
 
 ## SharePoint guest link
 
-Opening the guest link in Playwright first, then copying cookies into `requests`, improves some `_api` responses. Store the URL in SQLite (`sharepoint_guest_link`), in `app_settings.json`, or in `SP_GUEST_LINK`.
+Opening the guest link in Playwright first, then copying cookies into `requests`, improves some `_api` responses. Store the URL in SQLite (`sharepoint_guest_link`), in `app_settings.json` as `default_guest_share_link`, or in `SP_GUEST_LINK`.
 
 ## Why is `.venv` huge?
 

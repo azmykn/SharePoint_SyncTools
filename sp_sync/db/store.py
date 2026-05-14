@@ -15,6 +15,7 @@ KEY_GDRIVE_CONFIGS = "gdrive_configs"
 KEY_SP_COOKIES = "sharepoint_cookies"
 KEY_GDRIVE_TOKEN = "gdrive_oauth_token"
 KEY_GUEST_LINK = "sharepoint_guest_link"
+KEY_SP_SITE_URL = "sharepoint_site_root_url"
 
 _lock = threading.RLock()
 _store_singleton: Optional["AppStore"] = None
@@ -154,6 +155,13 @@ class AppStore:
 
     def get_guest_link(self) -> str:
         return self.get_text(KEY_GUEST_LINK, "").strip()
+
+    def get_sharepoint_site_url(self) -> str:
+        """SharePoint site root (e.g. personal site URL), set from the web UI / explorer only."""
+        return self.get_text(KEY_SP_SITE_URL, "").strip()
+
+    def set_sharepoint_site_url(self, url: str) -> None:
+        self.set_text(KEY_SP_SITE_URL, (url or "").strip())
 
 
 def get_store() -> AppStore:

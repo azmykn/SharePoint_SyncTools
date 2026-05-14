@@ -27,14 +27,58 @@ if sys.platform == "win32":
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session, Response
 
 from sp_sync.paths import project_root
-from sp_sync.config.settings import sharepoint_site_url
 
 ROOT = project_root()
 
 
+def detect_sharepoint_site_root_from_url(url: str) -> str:
+    """
+    Derive SharePoint site root (https://host/personal/user or https://host/sites/SiteName)
+    from a pasted full browser URL.
+    """
+    u = (url or "").strip()
+    if not u.lower().startswith("http"):
+        return ""
+    try:
+        p = urllib.parse.urlparse(u)
+    except Exception:
+        return ""
+    if "sharepoint.com" not in (p.netloc or "").lower():
+        return ""
+    parts = [seg for seg in (p.path or "").split("/") if seg]
+    for i, seg in enumerate(parts):
+        sl = seg.lower()
+        if sl == "personal" and i + 1 < len(parts):
+            root_path = "/personal/" + parts[i + 1]
+            return f"{p.scheme}://{p.netloc}{root_path}".rstrip("/")
+        if sl == "sites" and i + 1 < len(parts):
+            root_path = "/sites/" + parts[i + 1]
+            return f"{p.scheme}://{p.netloc}{root_path}".rstrip("/")
+    return ""
+
+
+def validate_sharepoint_site_url_for_save(url: str) -> tuple[bool, str]:
+    """Validate manual site root URL before saving to SQLite."""
+    u = (url or "").strip().rstrip("/")
+    if not u.lower().startswith("https://"):
+        return False, "URL must start with https://"
+    try:
+        p = urllib.parse.urlparse(u)
+    except Exception:
+        return False, "Invalid URL"
+    if "sharepoint.com" not in (p.netloc or "").lower():
+        return False, "Host must be a SharePoint Online host (*.sharepoint.com)."
+    path = (p.path or "").lower()
+    if "/personal/" not in path and "/sites/" not in path:
+        return False, "Path must include /personal/... or /sites/..."
+    return True, ""
+
+
 def sp_site() -> str:
-    """SharePoint personal/site root URL from config/app_settings.json or SP_SYNC_SITE_URL."""
-    return (sharepoint_site_url() or "").strip()
+    """SharePoint site root URL saved via web UI / explorer (SQLite only)."""
+    from sp_sync.db.store import get_store
+
+    return (get_store().get_sharepoint_site_url() or "").strip().rstrip("/")
 
 
 app = Flask(
@@ -84,7 +128,7 @@ def _hydrate_logs_from_db():
 _hydrate_logs_from_db()
 
 # ============================================================
-# SharePoint site URL: config/app_settings.json → sharepoint_site_url
+# SharePoint site URL: persisted in SQLite via web UI / explorer
 # ============================================================
 
 
@@ -203,6 +247,7 @@ def index():
         gd_user=gd_user,
         sync_status=sync_status,
         sp_site_configured=bool(sp_site().strip()),
+        sp_site_url_display=sp_site(),
     )
 
 
@@ -218,6 +263,22 @@ def sp_save_cookies():
     save_sp_cookies(fedauth, rtfa)
     add_log('sharepoint', '✅ Connection data saved.')
     return jsonify({'success': True})
+
+
+@app.route('/sp/save_site_url', methods=['POST'])
+def sp_save_site_url():
+    """Save SharePoint site root URL (manual fallback; explorer auto-detect also writes here)."""
+    from sp_sync.db.store import get_store
+
+    data = request.get_json(silent=True) or {}
+    raw = (data.get('site_url') or '').strip()
+    ok, err = validate_sharepoint_site_url_for_save(raw)
+    if not ok:
+        return jsonify({'success': False, 'error': err}), 400
+    u = raw.strip().rstrip("/")
+    get_store().set_sharepoint_site_url(u)
+    add_log('system', 'SharePoint site URL saved.')
+    return jsonify({'success': True, 'site_url': u})
 
 
 @app.route('/sp/auto_cookies', methods=['POST'])
@@ -276,7 +337,10 @@ def sp_sync():
     if not sp_site():
         return jsonify({
             'success': False,
-            'error': 'SharePoint site URL is not configured. Set sharepoint_site_url in config/app_settings.json or SP_SYNC_SITE_URL.',
+            'error': (
+                'SharePoint site URL is not set yet. Paste a full SharePoint link once in '
+                'SharePoint explorer (it will be saved automatically), or set it under Connection settings.'
+            ),
         })
 
     sp_configs = load_sp_configs()
@@ -312,19 +376,28 @@ def sp_sync():
 def sp_browse():
     """List folders and files under a SharePoint parent path (server-relative URL)."""
     from sp_sync.sharepoint.sync_engine import prime_sharepoint_rest_session
+    from sp_sync.db.store import get_store
 
     fedauth, rtfa = load_sp_cookies()
+    data = request.get_json(silent=True) or {}
+    prime_url = (data.get('prime_url') or '').strip()
+    if prime_url.lower().startswith("http"):
+        detected = detect_sharepoint_site_root_from_url(prime_url)
+        if detected:
+            get_store().set_sharepoint_site_url(detected)
+
     if not fedauth or not rtfa:
         return jsonify({'success': False, 'error': 'Please save FedAuth and rtFa first.'}), 401
     if not sp_site():
         return jsonify({
             'success': False,
-            'error': 'SharePoint site URL is not configured. Set sharepoint_site_url in config/app_settings.json or SP_SYNC_SITE_URL.',
+            'error': (
+                'SharePoint site URL is not set yet. Paste a full SharePoint link once in '
+                'SharePoint explorer (it will be saved automatically), or set it under Connection settings.'
+            ),
         }), 400
 
-    data = request.get_json(silent=True) or {}
     parent = (data.get('parent_rel_url') or '').strip()
-    prime_url = (data.get('prime_url') or '').strip()
     if "?" in parent:
         parent = parent.split("?", 1)[0].strip()
     if not parent.startswith('/'):
@@ -418,21 +491,31 @@ def sp_explore_page():
 @app.route('/sp/resolve_url', methods=['POST'])
 def sp_resolve_url():
     """Resolve full SharePoint/OneDrive URL to server-relative folder for browsing."""
+    from sp_sync.sharepoint.sync_engine import resolve_sharepoint_pasted_url
+    from sp_sync.db.store import get_store
+
     fedauth, rtfa = load_sp_cookies()
     if not fedauth or not rtfa:
         return jsonify({'success': False, 'error': 'Please save FedAuth and rtFa first.'}), 401
-    if not sp_site():
-        return jsonify({
-            'success': False,
-            'error': 'SharePoint site URL is not configured. Set sharepoint_site_url in config/app_settings.json or SP_SYNC_SITE_URL.',
-        }), 400
 
     data = request.get_json(silent=True) or {}
     url = (data.get('url') or '').strip()
     if not url:
         return jsonify({'success': False, 'error': 'URL is empty.'}), 400
 
-    from sp_sync.sharepoint.sync_engine import resolve_sharepoint_pasted_url
+    if url.lower().startswith("http"):
+        detected = detect_sharepoint_site_root_from_url(url)
+        if detected:
+            get_store().set_sharepoint_site_url(detected)
+
+    if not sp_site():
+        return jsonify({
+            'success': False,
+            'error': (
+                'SharePoint site URL is not set yet. Paste a full https SharePoint link once '
+                '(site root is detected automatically), or set it under Connection settings.'
+            ),
+        }), 400
 
     def log_cb(msg):
         add_log('sharepoint', msg)

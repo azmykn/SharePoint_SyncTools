@@ -54,13 +54,20 @@ def _find_system_chromium_executable():
 
 
 from sp_sync.paths import project_root
-from sp_sync.config.settings import default_guest_share_link, sharepoint_site_url
+from sp_sync.config.settings import default_guest_share_link
 
 
 def get_sp_site_url() -> str:
-    """Site root URL from config/env; placeholder if unset (sync will fail until configured)."""
-    u = sharepoint_site_url().strip()
-    return u if u else "https://not-configured.example.invalid"
+    """Site root URL from SQLite (set via web UI / explorer); empty until configured."""
+    try:
+        from sp_sync.db.store import get_store
+
+        u = get_store().get_sharepoint_site_url().strip()
+        if u:
+            return u.rstrip("/")
+    except Exception:
+        pass
+    return ""
 
 
 def get_default_guest_link() -> str:
@@ -1342,8 +1349,8 @@ if __name__ == "__main__":
         print("No cookies in SQLite. Run app.py and save cookies from the web UI.")
         raise SystemExit(1)
     site = get_sp_site_url()
-    if "not-configured" in site:
-        print("Configure sharepoint_site_url in config/app_settings.json or set SP_SYNC_SITE_URL.")
+    if not site:
+        print("Set SharePoint site URL from the web UI (Connection settings or paste a full link in Explorer).")
         raise SystemExit(1)
     print("=" * 60)
     print("  SharePoint sync (hybrid API + browser capture)")
