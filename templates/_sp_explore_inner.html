@@ -1,0 +1,169 @@
+{# Embedded SharePoint explorer (used inside index.html tab). #}
+<style>
+    #sp-explore-tab .sp-explore-host {
+        --primary: #0f172a;
+        --secondary: #1e293b;
+        --accent: #3b82f6;
+        --success: #10b981;
+        --danger: #ef4444;
+        --text-main: #f8fafc;
+        --text-muted: #94a3b8;
+        --border: #334155;
+        font-family: 'Inter', 'Cairo', system-ui, sans-serif;
+        color: var(--text-main);
+        padding: 0 8px 24px 0;
+        overflow-y: visible;
+    }
+    #sp-explore-tab .sp-explore-host .topbar .topbar-inner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; width: 100%; }
+    #sp-explore-tab .sp-explore-host .lang-switch { display: flex; gap: 6px; align-items: center; }
+    #sp-explore-tab .sp-explore-host .lang-switch button {
+        background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+        padding: 6px 12px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 0.8rem; font-weight: 600;
+    }
+    #sp-explore-tab .sp-explore-host .lang-switch button:hover { border-color: var(--accent); color: var(--accent); }
+    #sp-explore-tab .sp-explore-host .lang-switch button.active { border-color: var(--accent); color: var(--accent); background: rgba(59, 130, 246, 0.12); }
+    #sp-explore-tab .sp-explore-host .spx-dash-back {
+        background: transparent; border: none; color: var(--accent); font-weight: 600; font-family: inherit;
+        font-size: 0.9rem; cursor: pointer; text-decoration: none;
+    }
+    #sp-explore-tab .sp-explore-host .spx-dash-back:hover { text-decoration: underline; }
+    #sp-explore-tab .sp-explore-host .wrap { max-width: 1100px; margin: 0 auto; padding: 12px 0 20px 0; }
+    #sp-explore-tab .sp-explore-host .card {
+        background: rgba(30, 41, 59, 0.7);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px;
+        margin-bottom: 16px;
+    }
+    #sp-explore-tab .sp-explore-host .card-header { font-size: 1.1rem; font-weight: 700; color: var(--accent); margin-bottom: 12px; }
+    #sp-explore-tab .sp-explore-host .muted { font-size: 0.86rem; color: var(--text-muted); line-height: 1.5; margin-bottom: 12px; }
+    #sp-explore-tab .sp-explore-host .form-group { margin-bottom: 12px; }
+    #sp-explore-tab .sp-explore-host .form-group label { display: block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 4px; }
+    #sp-explore-tab .sp-explore-host .form-input {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: #0f172a;
+        color: var(--text-main);
+        font-family: inherit;
+        font-size: 0.9rem;
+    }
+    #sp-explore-tab .sp-explore-host .form-input:focus { outline: none; border-color: var(--accent); }
+    #sp-explore-tab .sp-explore-host .input-row { display: flex; gap: 8px; align-items: stretch; }
+    #sp-explore-tab .sp-explore-host .input-row .form-input { flex: 1; }
+    #sp-explore-tab .sp-explore-host .btn {
+        background: var(--accent);
+        color: white;
+        border: none;
+        padding: 10px 18px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-family: inherit;
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+    #sp-explore-tab .sp-explore-host .btn:hover { filter: brightness(1.08); }
+    #sp-explore-tab .sp-explore-host .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+    #sp-explore-tab .sp-explore-host .btn-success { background: var(--success); }
+    #sp-explore-tab .sp-explore-host .btn-small { padding: 6px 10px; font-size: 0.8rem; }
+    #sp-explore-tab .sp-explore-host .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+    #sp-explore-tab .sp-explore-host .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; }
+    #sp-explore-tab .sp-explore-host .badge-warn { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
+    #sp-explore-tab .sp-explore-host .badge-ok { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    #sp-explore-tab .sp-explore-host .explore-bc { font-size: 0.8rem; color: var(--text-muted); margin: 10px 0; word-break: break-all; line-height: 1.4; }
+    #sp-explore-tab .sp-explore-host .explore-browse-help {
+        font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;
+        margin-top: 8px; margin-bottom: 4px;
+    }
+    #sp-explore-tab .sp-explore-host .explore-browse-loading {
+        margin-top: 12px; padding: 14px; border-radius: 6px;
+        border: 1px dashed var(--border); color: var(--text-muted);
+    }
+    #sp-explore-tab .sp-explore-host .explore-browse-error {
+        margin-top: 12px; padding: 14px; border-radius: 6px;
+        border: 1px solid rgba(239, 68, 68, 0.55); background: rgba(239, 68, 68, 0.1);
+        color: #fecaca; font-size: 0.84rem; white-space: pre-wrap; word-break: break-word;
+    }
+    #sp-explore-tab .sp-explore-host .explore-browse-error code { font-size: 0.78rem; color: #fca5a5; }
+    #sp-explore-tab .sp-explore-host .explore-select-bar {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+        margin-top: 10px; margin-bottom: 6px;
+    }
+    #sp-explore-tab .sp-explore-host .explore-select-bar .muted { margin: 0; }
+    #sp-explore-tab .sp-explore-host .explore-table-wrap { overflow-x: auto; margin-top: 10px; }
+    #sp-explore-tab .sp-explore-host .explore-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    #sp-explore-tab .sp-explore-host .explore-table th, #sp-explore-tab .sp-explore-host .explore-table td {
+        border: 1px solid var(--border);
+        padding: 6px 8px;
+        text-align: left;
+    }
+    #sp-explore-tab .sp-explore-host .explore-table th { background: rgba(15, 23, 42, 0.9); color: var(--text-muted); }
+    #sp-explore-tab .sp-explore-host .explore-kind { font-size: 0.75rem; color: var(--text-muted); }
+    #sp-explore-tab .sp-explore-host .spx-toast {
+        position: fixed; bottom: 20px; right: 20px;
+        background: var(--secondary); border-left: 4px solid var(--accent);
+        color: white; padding: 12px 18px; border-radius: 6px;
+        opacity: 0; transform: translateY(12px); transition: 0.25s; z-index: 10050;
+    }
+    #sp-explore-tab .sp-explore-host .spx-toast.show { opacity: 1; transform: translateY(0); }
+    #sp-explore-tab .sp-explore-host .spx-toast.err { border-color: var(--danger); }
+</style>
+<div class="sp-explore-host" lang="en" dir="ltr">
+    <div class="topbar">
+        <div class="topbar-inner">
+            <span style="font-weight:700;" data-i18n="pageTitle">SharePoint explorer</span>
+            <div class="lang-switch" id="spx-lang-switch" aria-label="Language">
+                <button type="button" id="spx-lang-en" class="active">English</button>
+                <button type="button" id="spx-lang-ar">العربية</button>
+            </div>
+            <button type="button" class="spx-dash-back" id="spx-back-dashboard" data-i18n="backDashboard">← SharePoint</button>
+        </div>
+    </div>
+    <div class="wrap">
+        {% if not sp_explore_auth %}
+        <p class="badge badge-warn" id="spx-badge-warn" style="display:block;" data-i18n="badgeWarn">Not connected: save FedAuth and rtFa in the Connection settings tab first.</p>
+        <p class="badge badge-ok" id="spx-badge-ok" style="display:none;" data-i18n="badgeOk">Cookie session ready for browsing</p>
+        {% else %}
+        <p class="badge badge-warn" id="spx-badge-warn" style="display:none;" data-i18n="badgeWarn">Not connected: save FedAuth and rtFa in the Connection settings tab first.</p>
+        <p class="badge badge-ok" id="spx-badge-ok" style="display:block;" data-i18n="badgeOk">Cookie session ready for browsing</p>
+        {% endif %}
+
+        <div class="card">
+            <div class="card-header" data-i18n="card1Title">1) Paste a sharing link or path</div>
+            <p class="muted" data-i18n-html="card1Help"></p>
+            <div class="form-group">
+                <label data-i18n="labelPaste">Full link or relative path</label>
+                <textarea class="form-input" id="spx-paste" rows="3" data-i18n-placeholder="phPaste"></textarea>
+            </div>
+            <div class="actions">
+                <button type="button" class="btn" id="spx-resolve" {% if not sp_explore_auth %}disabled{% endif %} data-i18n="btnResolve">Resolve link</button>
+            </div>
+            <p class="muted" id="spx-resolve-meta" style="margin-top:10px;display:none;"></p>
+        </div>
+
+        <div class="card">
+            <div class="card-header" data-i18n="card2Title">2) Current folder and local paths</div>
+            <div class="form-group">
+                <label data-i18n="labelParent">Current folder (relative URL) — filled automatically after resolving</label>
+                <input type="text" class="form-input" id="spx-parent" data-i18n-placeholder="phParent" value="{{ sp_path_hint|e }}">
+            </div>
+            <div class="form-group">
+                <label data-i18n="labelLocalRoot">Suggested local root (prefix for paths in the table)</label>
+                <div class="input-row">
+                    <input type="text" class="form-input" id="spx-local-root" data-i18n-placeholder="phLocalRoot">
+                    <button type="button" class="btn btn-outline btn-small" onclick="browseFolder('spx-local-root')">📂</button>
+                </div>
+            </div>
+            <div class="actions">
+                <button type="button" class="btn" id="spx-browse" {% if not sp_explore_auth %}disabled{% endif %} data-i18n="btnBrowse">Browse</button>
+                <button type="button" class="btn btn-outline" id="spx-back" data-i18n="btnBack">Back</button>
+                <button type="button" class="btn btn-success" id="spx-bulk" data-i18n="btnBulk">Add selected to sync</button>
+            </div>
+            <p class="explore-browse-help" id="spx-browse-help" data-i18n-html="browseHelp"></p>
+            <div id="spx-bc" class="explore-bc"></div>
+            <div class="explore-table-wrap" id="spx-results"></div>
+        </div>
+    </div>
+    <div id="spx-toast" class="spx-toast"></div>
+</div>

@@ -23,14 +23,14 @@
             color: var(--text-main);
             min-height: 100vh;
         }
-        .topbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 12px 20px;
-            border-bottom: 1px solid var(--border);
-            background: rgba(15, 23, 42, 0.95);
+        .topbar .topbar-inner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; width: 100%; }
+        .lang-switch { display: flex; gap: 6px; align-items: center; }
+        .lang-switch button {
+            background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+            padding: 6px 12px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 0.8rem; font-weight: 600;
         }
+        .lang-switch button:hover { border-color: var(--accent); color: var(--accent); }
+        .lang-switch button.active { border-color: var(--accent); color: var(--accent); background: rgba(59, 130, 246, 0.12); }
         .topbar a { color: var(--accent); text-decoration: none; font-weight: 600; }
         .topbar a:hover { text-decoration: underline; }
         .wrap { max-width: 1100px; margin: 0 auto; padding: 20px; }
@@ -78,6 +78,25 @@
         .badge-warn { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
         .badge-ok { background: rgba(16, 185, 129, 0.2); color: #34d399; }
         .explore-bc { font-size: 0.8rem; color: var(--text-muted); margin: 10px 0; word-break: break-all; line-height: 1.4; }
+        .explore-browse-help {
+            font-size: 0.82rem; color: var(--text-muted); line-height: 1.5;
+            margin-top: 8px; margin-bottom: 4px;
+        }
+        .explore-browse-loading {
+            margin-top: 12px; padding: 14px; border-radius: 6px;
+            border: 1px dashed var(--border); color: var(--text-muted);
+        }
+        .explore-browse-error {
+            margin-top: 12px; padding: 14px; border-radius: 6px;
+            border: 1px solid rgba(239, 68, 68, 0.55); background: rgba(239, 68, 68, 0.1);
+            color: #fecaca; font-size: 0.84rem; white-space: pre-wrap; word-break: break-word;
+        }
+        .explore-browse-error code { font-size: 0.78rem; color: #fca5a5; }
+        .explore-select-bar {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+            margin-top: 10px; margin-bottom: 6px;
+        }
+        .explore-select-bar .muted { margin: 0; }
         .explore-table-wrap { overflow-x: auto; margin-top: 10px; }
         .explore-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
         .explore-table th, .explore-table td {
@@ -99,51 +118,56 @@
 </head>
 <body>
     <div class="topbar">
-        <span style="font-weight:700;">SharePoint explorer</span>
-        <a href="{{ url_for('index') }}">← Back to dashboard</a>
+        <div class="topbar-inner">
+            <span style="font-weight:700;" data-i18n="pageTitle">SharePoint explorer</span>
+            <div class="lang-switch" id="spx-lang-switch" aria-label="Language">
+                <button type="button" id="spx-lang-en" class="active">English</button>
+                <button type="button" id="spx-lang-ar">العربية</button>
+            </div>
+            <a href="{{ url_for('index') }}" data-i18n="backDashboard">← Back to dashboard</a>
+        </div>
     </div>
     <div class="wrap">
         {% if not sp_auth %}
-        <p class="badge badge-warn">Not connected: save FedAuth and rtFa in the Connection settings tab first.</p>
+        <p class="badge badge-warn" id="spx-badge-warn" style="display:block;" data-i18n="badgeWarn">Not connected: save FedAuth and rtFa in the Connection settings tab first.</p>
+        <p class="badge badge-ok" id="spx-badge-ok" style="display:none;" data-i18n="badgeOk">Cookie session ready for browsing</p>
         {% else %}
-        <p class="badge badge-ok">Cookie session ready for browsing</p>
+        <p class="badge badge-warn" id="spx-badge-warn" style="display:none;" data-i18n="badgeWarn">Not connected: save FedAuth and rtFa in the Connection settings tab first.</p>
+        <p class="badge badge-ok" id="spx-badge-ok" style="display:block;" data-i18n="badgeOk">Cookie session ready for browsing</p>
         {% endif %}
 
         <div class="card">
-            <div class="card-header">1) Paste a sharing link or path</div>
-            <p class="muted">
-                Paste the full link from the browser (for example <code>https://…sharepoint.com/:f:/g/personal/…?e=…</code>)
-                then click <strong>Resolve link</strong>. It will be converted to a relative path and folders/files will load.
-                You can also paste a relative path starting with <code>/personal/…</code> directly.
-            </p>
+            <div class="card-header" data-i18n="card1Title">1) Paste a sharing link or path</div>
+            <p class="muted" data-i18n-html="card1Help"></p>
             <div class="form-group">
-                <label>Full link or relative path</label>
-                <textarea class="form-input" id="spx-paste" rows="3" placeholder="https://… or /personal/…"></textarea>
+                <label data-i18n="labelPaste">Full link or relative path</label>
+                <textarea class="form-input" id="spx-paste" rows="3" data-i18n-placeholder="phPaste"></textarea>
             </div>
             <div class="actions">
-                <button type="button" class="btn" id="spx-resolve" {% if not sp_auth %}disabled{% endif %}>Resolve link</button>
+                <button type="button" class="btn" id="spx-resolve" {% if not sp_auth %}disabled{% endif %} data-i18n="btnResolve">Resolve link</button>
             </div>
             <p class="muted" id="spx-resolve-meta" style="margin-top:10px;display:none;"></p>
         </div>
 
         <div class="card">
-            <div class="card-header">2) Current folder and local paths</div>
+            <div class="card-header" data-i18n="card2Title">2) Current folder and local paths</div>
             <div class="form-group">
-                <label>Current folder (relative URL) — filled automatically after resolving</label>
-                <input type="text" class="form-input" id="spx-parent" placeholder="/personal/..." value="{{ sp_path_hint|e }}">
+                <label data-i18n="labelParent">Current folder (relative URL) — filled automatically after resolving</label>
+                <input type="text" class="form-input" id="spx-parent" data-i18n-placeholder="phParent" value="{{ sp_path_hint|e }}">
             </div>
             <div class="form-group">
-                <label>Suggested local root (prefix for paths in the table)</label>
+                <label data-i18n="labelLocalRoot">Suggested local root (prefix for paths in the table)</label>
                 <div class="input-row">
-                    <input type="text" class="form-input" id="spx-local-root" placeholder="e.g. D:/Downloads/SP">
+                    <input type="text" class="form-input" id="spx-local-root" data-i18n-placeholder="phLocalRoot">
                     <button type="button" class="btn btn-outline btn-small" onclick="browseFolder('spx-local-root')">📂</button>
                 </div>
             </div>
             <div class="actions">
-                <button type="button" class="btn" id="spx-browse" {% if not sp_auth %}disabled{% endif %}>Browse</button>
-                <button type="button" class="btn btn-outline" id="spx-back">Back</button>
-                <button type="button" class="btn btn-success" id="spx-bulk">Add selected to sync</button>
+                <button type="button" class="btn" id="spx-browse" {% if not sp_auth %}disabled{% endif %} data-i18n="btnBrowse">Browse</button>
+                <button type="button" class="btn btn-outline" id="spx-back" data-i18n="btnBack">Back</button>
+                <button type="button" class="btn btn-success" id="spx-bulk" data-i18n="btnBulk">Add selected to sync</button>
             </div>
+            <p class="explore-browse-help" id="spx-browse-help" data-i18n-html="browseHelp"></p>
             <div id="spx-bc" class="explore-bc"></div>
             <div class="explore-table-wrap" id="spx-results"></div>
         </div>
@@ -151,15 +175,242 @@
     <div id="toast" class="toast"></div>
 
     <script>
+        const SPX_I18N = {
+            en: {
+                pageTitle: 'SharePoint explorer',
+                backDashboard: '← Back to dashboard',
+                badgeWarn: 'Not connected: save FedAuth and rtFa in the Connection settings tab first.',
+                badgeOk: 'Cookie session ready for browsing',
+                card1Title: '1) Paste a sharing link or path',
+                card1Help: 'Paste the full link from the browser (for example <code>https://…sharepoint.com/:f:/g/personal/…?e=…</code>) then click <strong>Resolve link</strong>. It will be converted to a relative path and folders/files will load. You can also paste a relative path starting with <code>/personal/…</code> directly.',
+                labelPaste: 'Full link or relative path',
+                phPaste: 'https://… or /personal/…',
+                btnResolve: 'Resolve link',
+                card2Title: '2) Current folder and local paths',
+                labelParent: 'Current folder (relative URL) — filled automatically after resolving',
+                phParent: '/personal/…',
+                labelLocalRoot: 'Suggested local root (prefix for paths in the table)',
+                phLocalRoot: 'e.g. D:/Downloads/SP',
+                btnBrowse: 'Browse',
+                btnBack: 'Back',
+                btnBulk: 'Add selected to sync',
+                browseHelp: 'After <strong>Browse</strong>, the table lists <strong>files and subfolders</strong> in the current path. Use <strong>Open</strong> on a folder row to go inside it, select rows, then <strong>Add selected to sync</strong>.',
+                loadingBrowse: 'Loading folder contents…',
+                browseFailed: 'Browse failed',
+                invalidJson: 'Invalid JSON from server',
+                invalidServerResponse: 'Invalid server response',
+                networkError: 'Network error',
+                errorTipCookies: 'Tip: use Resolve link again or refresh FedAuth/rtFa in Connection settings.',
+                contentTypeLabel: 'Content-Type:',
+                folderEmpty: 'This folder is empty.',
+                selectAll: 'Select all',
+                clearSelection: 'Clear selection',
+                itemsInFolder: 'item(s) in this folder',
+                colType: 'Type',
+                colName: 'Name',
+                colLocal: 'Local path',
+                colOpen: 'Open',
+                typeFolder: 'Folder',
+                typeFile: 'File',
+                btnOpenFolder: 'Open',
+                openFolderTitle: 'Open this folder and list its contents',
+                selectAllTitle: 'Select all rows (folders and files)',
+                clearSelectionTitle: 'Clear all checkboxes',
+                pasteFirst: 'Paste a link first',
+                resolving: 'Resolving link…',
+                resolveFailed: 'Could not resolve link',
+                resolveDone: 'Done:',
+                linkResolvedLoading: 'Link resolved — loading browse',
+                connectionError: 'Connection error',
+                loadedCounts: 'Loaded {folders} folder(s), {files} file(s)',
+                selectOneRow: 'Select at least one row',
+                saveFailed: 'Save failed',
+                mergedReload: 'Merged {n} item(s) — reloading',
+            },
+            ar: {
+                pageTitle: 'مستكشف SharePoint',
+                backDashboard: '← العودة إلى لوحة التحكم',
+                badgeWarn: 'غير متصل: احفظ FedAuth و rtFa من تبويب إعدادات الاتصال أولاً.',
+                badgeOk: 'جلسة الكوكيز جاهزة للتصفح',
+                card1Title: '1) لصق رابط مشاركة أو مسار',
+                card1Help: 'الصق الرابط الكامل من المتصفح (مثال <code>https://…sharepoint.com/:f:/g/personal/…?e=…</code>) ثم اضغط <strong>حل الرابط</strong>. سيُحوَّل إلى مسار نسبي وتُحمَّل المجلدات والملفات. يمكنك أيضاً لصق مسار يبدأ بـ <code>/personal/…</code> مباشرة.',
+                labelPaste: 'رابط كامل أو مسار نسبي',
+                phPaste: 'https://… أو /personal/…',
+                btnResolve: 'حل الرابط',
+                card2Title: '2) المجلد الحالي والمسارات المحلية',
+                labelParent: 'المجلد الحالي (مسار نسبي) — يُملأ تلقائياً بعد الحل',
+                phParent: '/personal/…',
+                labelLocalRoot: 'جذر محلي مقترح (بادئة لمسارات الجدول)',
+                phLocalRoot: 'مثال D:/Downloads/SP',
+                btnBrowse: 'تصفح',
+                btnBack: 'رجوع',
+                btnBulk: 'إضافة المحدد للمزامنة',
+                browseHelp: 'بعد <strong>تصفح</strong>، يعرض الجدول <strong>الملفات والمجلدات الفرعية</strong> للمسار الحالي. استخدم <strong>فتح</strong> على صف مجلد للدخول إليه، حدد الصفوف، ثم <strong>إضافة المحدد للمزامنة</strong>.',
+                loadingBrowse: 'جاري تحميل محتويات المجلد…',
+                browseFailed: 'فشل التصفح',
+                invalidJson: 'استجابة غير صالحة من الخادم',
+                invalidServerResponse: 'استجابة غير صالحة',
+                networkError: 'خطأ في الشبكة',
+                errorTipCookies: 'نصيحة: أعد حل الرابط أو حدّث FedAuth/rtFa من إعدادات الاتصال.',
+                contentTypeLabel: 'نوع المحتوى:',
+                folderEmpty: 'هذا المجلد فارغ.',
+                selectAll: 'تحديد الكل',
+                clearSelection: 'إلغاء التحديد',
+                itemsInFolder: 'عنصراً في هذا المجلد',
+                colType: 'النوع',
+                colName: 'الاسم',
+                colLocal: 'المسار المحلي',
+                colOpen: 'فتح',
+                typeFolder: 'مجلد',
+                typeFile: 'ملف',
+                btnOpenFolder: 'فتح',
+                openFolderTitle: 'فتح هذا المجلد وعرض محتوياته',
+                selectAllTitle: 'تحديد كل الصفوف',
+                clearSelectionTitle: 'إلغاء تحديد الكل',
+                pasteFirst: 'الصق الرابط أولاً',
+                resolving: 'جاري حل الرابط…',
+                resolveFailed: 'تعذر حل الرابط',
+                resolveDone: 'تم:',
+                linkResolvedLoading: 'تم حل الرابط — جاري التحميل',
+                connectionError: 'خطأ في الاتصال',
+                loadedCounts: 'تم التحميل: {folders} مجلد(ات)، {files} ملف(ات)',
+                selectOneRow: 'حدد صفاً واحداً على الأقل',
+                saveFailed: 'فشل الحفظ',
+                mergedReload: 'تم دمج {n} عنصر(ات) — إعادة التحميل',
+            },
+        };
+
+        const SPX_LANG_KEY = 'sp_explore_lang';
+        let spxLang = (localStorage.getItem(SPX_LANG_KEY) === 'ar') ? 'ar' : 'en';
+        let __SPX_LAST_BROWSE_DATA = null;
+
+        function spxT(key) {
+            const b = SPX_I18N[spxLang] || SPX_I18N.en;
+            const f = SPX_I18N.en;
+            return (b[key] !== undefined && b[key] !== '') ? b[key] : (f[key] || key);
+        }
+
+        function spxTf(key, vars) {
+            let s = spxT(key);
+            if (vars) {
+                Object.keys(vars).forEach((k) => {
+                    s = s.replace(new RegExp('\\{' + k + '\\}', 'g'), String(vars[k]));
+                });
+            }
+            return s;
+        }
+
+        function spxPickApiText(data, baseKey) {
+            if (!data) return '';
+            if (spxLang === 'ar' && data[baseKey + '_ar']) return String(data[baseKey + '_ar']);
+            if (data[baseKey + '_en']) return String(data[baseKey + '_en']);
+            if (data[baseKey]) return String(data[baseKey]);
+            return '';
+        }
+
+        function spxApplyLang() {
+            localStorage.setItem(SPX_LANG_KEY, spxLang);
+            document.documentElement.lang = spxLang === 'ar' ? 'ar' : 'en';
+            document.documentElement.dir = spxLang === 'ar' ? 'rtl' : 'ltr';
+            document.querySelectorAll('[data-i18n]').forEach((el) => {
+                const k = el.getAttribute('data-i18n');
+                if (k) el.textContent = spxT(k);
+            });
+            document.querySelectorAll('[data-i18n-html]').forEach((el) => {
+                const k = el.getAttribute('data-i18n-html');
+                if (k) el.innerHTML = spxT(k);
+            });
+            document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+                const k = el.getAttribute('data-i18n-placeholder');
+                if (k) el.placeholder = spxT(k);
+            });
+            const ben = document.getElementById('spx-lang-en');
+            const bar = document.getElementById('spx-lang-ar');
+            if (ben && bar) {
+                ben.classList.toggle('active', spxLang === 'en');
+                bar.classList.toggle('active', spxLang === 'ar');
+            }
+            if (__SPX_LAST_BROWSE_DATA) exploreRenderTable(__SPX_LAST_BROWSE_DATA);
+        }
+
+        document.getElementById('spx-lang-en').addEventListener('click', () => { spxLang = 'en'; spxApplyLang(); });
+        document.getElementById('spx-lang-ar').addEventListener('click', () => { spxLang = 'ar'; spxApplyLang(); });
+
         let exploreHistory = [];
-        /** Last resolved browser URL — sent as prime_url so /sp/browse can warm cookies like resolve. */
         let sessionPrimeUrl = '';
+        let sessionSharingUrl = '';
 
         function showToast(msg, isErr) {
             const t = document.getElementById('toast');
             t.textContent = msg;
             t.className = 'toast show' + (isErr ? ' err' : '');
-            setTimeout(() => t.classList.remove('show'), 3500);
+            setTimeout(() => t.classList.remove('show'), 4500);
+        }
+
+        function exploreShowLoading(message) {
+            const wrap = document.getElementById('spx-results');
+            wrap.innerHTML = '';
+            const p = document.createElement('p');
+            p.className = 'explore-browse-loading';
+            p.textContent = message || spxT('loadingBrowse');
+            wrap.appendChild(p);
+        }
+
+        function exploreShowBrowseError(title, status, rawText, data) {
+            const wrap = document.getElementById('spx-results');
+            wrap.innerHTML = '';
+            const box = document.createElement('div');
+            box.className = 'explore-browse-error';
+            const head = document.createElement('div');
+            head.style.fontWeight = '700';
+            head.style.marginBottom = '8px';
+            const t = title || spxT('browseFailed');
+            const m = t.match(/HTTP\s+(\d{3})/i);
+            if (m && status && String(status) === m[1]) {
+                head.textContent = t;
+            } else if (status) {
+                head.textContent = t + ' (HTTP ' + status + ')';
+            } else {
+                head.textContent = t;
+            }
+            box.appendChild(head);
+            const perm = spxPickApiText(data, 'permission_hint');
+            if (perm) {
+                const ph = document.createElement('div');
+                ph.style.marginTop = '10px';
+                ph.style.fontSize = '0.86rem';
+                ph.style.lineHeight = '1.45';
+                ph.textContent = perm;
+                box.appendChild(ph);
+            }
+            if (data && data.body_snippet) {
+                const sn = document.createElement('div');
+                sn.style.marginTop = '6px';
+                sn.style.fontSize = '0.8rem';
+                sn.style.opacity = '0.95';
+                sn.textContent = String(data.body_snippet).slice(0, 900);
+                box.appendChild(sn);
+            }
+            if (rawText && (!data || !data.body_snippet)) {
+                const sn = document.createElement('div');
+                sn.style.marginTop = '6px';
+                sn.style.fontSize = '0.78rem';
+                sn.textContent = String(rawText).slice(0, 900);
+                box.appendChild(sn);
+            }
+            if (data && data.content_type) {
+                const ct = document.createElement('div');
+                ct.style.marginTop = '8px';
+                ct.style.fontSize = '0.75rem';
+                ct.textContent = spxT('contentTypeLabel') + ' ' + data.content_type;
+                box.appendChild(ct);
+            }
+            const hint = document.createElement('div');
+            hint.style.marginTop = '10px';
+            hint.style.fontSize = '0.8rem';
+            hint.textContent = spxT('errorTipCookies');
+            box.appendChild(hint);
+            wrap.appendChild(box);
         }
 
         async function browseFolder(inputId) {
@@ -179,10 +430,10 @@
 
         document.getElementById('spx-resolve').addEventListener('click', async () => {
             const raw = document.getElementById('spx-paste').value.trim();
-            if (!raw) { showToast('Paste a link first', true); return; }
+            if (!raw) { showToast(spxT('pasteFirst'), true); return; }
             const meta = document.getElementById('spx-resolve-meta');
             meta.style.display = 'block';
-            meta.textContent = '⏳ Resolving link…';
+            meta.textContent = '⏳ ' + spxT('resolving');
             try {
                 const res = await fetch('/sp/resolve_url', {
                     method: 'POST',
@@ -191,19 +442,21 @@
                 });
                 const data = await res.json();
                 if (!data.success) {
-                    meta.textContent = (data.error || 'Failed') + (data.hint ? ' — ' + data.hint : '');
-                    showToast(data.error || 'Could not resolve link', true);
+                    meta.textContent = (data.error || spxT('resolveFailed')) + (data.hint ? ' — ' + data.hint : '');
+                    showToast(data.error || spxT('resolveFailed'), true);
                     return;
                 }
                 document.getElementById('spx-parent').value = data.browse_parent || '';
                 exploreHistory = [];
                 sessionPrimeUrl = (data.final_url || '').trim();
-                meta.textContent = 'Done: ' + (data.resolved_from || '') + (data.final_url ? ' ← ' + data.final_url : '');
-                showToast('Link resolved — loading browse');
+                sessionSharingUrl = (data.sharing_url || '').trim();
+                if (!sessionSharingUrl && /:[fwx]:\//i.test(raw)) sessionSharingUrl = raw;
+                meta.textContent = spxT('resolveDone') + ' ' + (data.resolved_from || '') + (data.final_url ? ' ← ' + data.final_url : '');
+                showToast(spxT('linkResolvedLoading'), false);
                 exploreRun();
             } catch (e) {
-                meta.textContent = 'Connection error';
-                showToast('Connection error', true);
+                meta.textContent = spxT('connectionError');
+                showToast(spxT('connectionError'), true);
             }
         });
 
@@ -217,37 +470,110 @@
                 ? exploreHistory.map((h) => h.name || h.rel_url).join(' / ') + ' / '
                 : '';
             const browsePayload = { parent_rel_url: parent };
-            if (sessionPrimeUrl) browsePayload.prime_url = sessionPrimeUrl;
+            let prime = (sessionPrimeUrl || '').trim();
+            if (!prime) {
+                const paste = document.getElementById('spx-paste').value.trim();
+                if (paste.toLowerCase().startsWith('http') && paste.toLowerCase().includes('sharepoint')) {
+                    prime = paste;
+                }
+            }
+            if (prime) browsePayload.prime_url = prime;
+            const shareLink = (sessionSharingUrl || '').trim();
+            if (shareLink) browsePayload.sharing_link_url = shareLink;
+
+            exploreShowLoading();
+
             fetch('/sp/browse', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(browsePayload),
             })
-                .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })))
-                .then(({ ok, data }) => {
-                    if (!ok || !data.success) {
-                        showToast(data.error || 'Browse failed', true);
-                        document.getElementById('spx-results').innerHTML = '';
+                .then(async (r) => {
+                    const text = await r.text();
+                    let data = {};
+                    try {
+                        data = text ? JSON.parse(text) : {};
+                    } catch (e) {
+                        exploreShowBrowseError(spxT('invalidJson'), r.status, text, null);
+                        showToast(spxT('invalidServerResponse'), true);
+                        __SPX_LAST_BROWSE_DATA = null;
                         return;
                     }
+                    if (!r.ok || !data.success) {
+                        exploreShowBrowseError(data.error || spxT('browseFailed'), r.status, text, data);
+                        showToast(data.error || spxT('browseFailed'), true);
+                        __SPX_LAST_BROWSE_DATA = null;
+                        return;
+                    }
+                    if (data.parent) parentInput.value = data.parent;
                     exploreRenderTable(data);
+                    const nf = (data.folders && data.folders.length) || 0;
+                    const nfi = (data.files && data.files.length) || 0;
+                    if (nf + nfi > 0) {
+                        showToast(spxTf('loadedCounts', { folders: nf, files: nfi }), false);
+                    }
                 })
-                .catch(() => showToast('Connection error', true));
+                .catch((e) => {
+                    exploreShowBrowseError(spxT('networkError'), '', String(e && e.message ? e.message : e), null);
+                    showToast(spxT('connectionError'), true);
+                    __SPX_LAST_BROWSE_DATA = null;
+                });
         }
 
         function exploreRenderTable(data) {
+            if (!data || data.success === false) return;
+            __SPX_LAST_BROWSE_DATA = data;
             const wrap = document.getElementById('spx-results');
             const root = document.getElementById('spx-local-root').value.trim();
             const folders = data.folders || [];
             const files = data.files || [];
             if (!folders.length && !files.length) {
-                wrap.innerHTML = '<p class="muted" style="margin-top:10px;">This folder is empty.</p>';
+                wrap.innerHTML = '';
+                const p1 = document.createElement('p');
+                p1.className = 'muted';
+                p1.style.marginTop = '10px';
+                p1.textContent = spxT('folderEmpty');
+                wrap.appendChild(p1);
+                const hintText = spxPickApiText(data, 'hint');
+                if (hintText.trim()) {
+                    const p2 = document.createElement('p');
+                    p2.className = 'muted';
+                    p2.style.marginTop = '8px';
+                    p2.textContent = hintText;
+                    wrap.appendChild(p2);
+                }
                 return;
             }
+            const bar = document.createElement('div');
+            bar.className = 'explore-select-bar';
+            const btnAll = document.createElement('button');
+            btnAll.type = 'button';
+            btnAll.className = 'btn btn-outline btn-small';
+            btnAll.textContent = spxT('selectAll');
+            btnAll.title = spxT('selectAllTitle');
+            const btnNone = document.createElement('button');
+            btnNone.type = 'button';
+            btnNone.className = 'btn btn-outline btn-small';
+            btnNone.textContent = spxT('clearSelection');
+            btnNone.title = spxT('clearSelectionTitle');
+            const countHint = document.createElement('span');
+            countHint.className = 'muted';
+            const n = folders.length + files.length;
+            countHint.textContent = n + ' ' + spxT('itemsInFolder');
+            bar.appendChild(btnAll);
+            bar.appendChild(btnNone);
+            bar.appendChild(countHint);
+
             const table = document.createElement('table');
             table.className = 'explore-table';
             const thead = document.createElement('thead');
-            thead.innerHTML = '<tr><th></th><th>Type</th><th>Name</th><th>Local path</th><th></th></tr>';
+            const trh = document.createElement('tr');
+            ['', spxT('colType'), spxT('colName'), spxT('colLocal'), spxT('colOpen')].forEach((h) => {
+                const th = document.createElement('th');
+                th.textContent = h;
+                trh.appendChild(th);
+            });
+            thead.appendChild(trh);
             table.appendChild(thead);
             const tbody = document.createElement('tbody');
 
@@ -264,7 +590,7 @@
                 tr.appendChild(td0);
                 const tdKind = document.createElement('td');
                 tdKind.className = 'explore-kind';
-                tdKind.textContent = 'Folder';
+                tdKind.textContent = spxT('typeFolder');
                 tr.appendChild(tdKind);
                 const tdName = document.createElement('td');
                 tdName.textContent = fo.name;
@@ -280,7 +606,8 @@
                 const btn = document.createElement('button');
                 btn.type = 'button';
                 btn.className = 'btn btn-outline btn-small';
-                btn.textContent = 'Open';
+                btn.textContent = spxT('btnOpenFolder');
+                btn.title = spxT('openFolderTitle');
                 btn.addEventListener('click', () => {
                     const cur = document.getElementById('spx-parent').value.trim();
                     exploreHistory.push({ rel_url: cur, name: fo.name || fo.rel_url });
@@ -306,7 +633,7 @@
                 const tdKind = document.createElement('td');
                 tdKind.className = 'explore-kind';
                 const mb = fi.size != null ? (Number(fi.size) / 1024 / 1024).toFixed(2) + ' MB' : '—';
-                tdKind.textContent = 'File (' + mb + ')';
+                tdKind.textContent = spxT('typeFile') + ' (' + mb + ')';
                 tr.appendChild(tdKind);
                 const tdName = document.createElement('td');
                 tdName.textContent = fi.name;
@@ -324,7 +651,18 @@
 
             table.appendChild(tbody);
             wrap.innerHTML = '';
+            wrap.appendChild(bar);
             wrap.appendChild(table);
+
+            function allPickCheckboxes() {
+                return wrap.querySelectorAll('.ex-pick');
+            }
+            btnAll.addEventListener('click', () => {
+                allPickCheckboxes().forEach((cb) => { cb.checked = true; });
+            });
+            btnNone.addEventListener('click', () => {
+                allPickCheckboxes().forEach((cb) => { cb.checked = false; });
+            });
         }
 
         document.getElementById('spx-back').addEventListener('click', () => {
@@ -355,7 +693,7 @@
                 if (rel && local_path) items.push({ name, rel_url: rel, local_path, entry_type: 'file' });
             });
             if (!items.length) {
-                showToast('Select at least one row', true);
+                showToast(spxT('selectOneRow'), true);
                 return;
             }
             fetch('/sp/bulk_add', {
@@ -366,14 +704,16 @@
                 .then((r) => r.json().then((d) => ({ ok: r.ok, data: d })))
                 .then(({ ok, data }) => {
                     if (!ok || !data.success) {
-                        showToast(data.error || 'Save failed', true);
+                        showToast(data.error || spxT('saveFailed'), true);
                         return;
                     }
-                    showToast('Merged ' + data.merged + ' item(s) — reloading');
+                    showToast(spxTf('mergedReload', { n: data.merged }), false);
                     setTimeout(() => { window.location.href = '/'; }, 900);
                 })
-                .catch(() => showToast('Connection error', true));
+                .catch(() => showToast(spxT('connectionError'), true));
         });
+
+        spxApplyLang();
     </script>
 </body>
 </html>

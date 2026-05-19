@@ -16,6 +16,10 @@ import urllib.parse
 from datetime import datetime
 from collections import deque
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
 # Force UTF-8
 if sys.platform == "win32":
     try:
@@ -237,10 +241,18 @@ def index():
     except Exception as e:
         add_log('system', f'Error checking Google Drive auth: {e}')
     
+    sp_path_hint = ""
+    for c in sp_configs or []:
+        if c.get('rel_url') and str(c.get('entry_type', 'folder')).lower() != 'file':
+            sp_path_hint = c['rel_url']
+            break
+
     return render_template('index.html',
         fedauth=fedauth,
         rtfa=rtfa,
         sp_auth=bool(fedauth),
+        sp_explore_auth=bool(fedauth and rtfa),
+        sp_path_hint=sp_path_hint,
         sp_folders=sp_configs,
         gd_folders=gdrive_configs,
         gd_auth=gd_authenticated,
@@ -375,16 +387,28 @@ def sp_sync():
 @app.route('/sp/browse', methods=['POST'])
 def sp_browse():
     """List folders and files under a SharePoint parent path (server-relative URL)."""
-    from sp_sync.sharepoint.sync_engine import prime_sharepoint_rest_session
+    from sp_sync.sharepoint.sync_engine import (
+        prime_sharepoint_session_for_browse,
+        _sp_share_requests_session,
+    )
+    from sp_sync.sharepoint.rest_folder_list import (
+        list_folder_children_rest,
+        browse_empty_hint_i18n,
+    )
     from sp_sync.db.store import get_store
 
     fedauth, rtfa = load_sp_cookies()
     data = request.get_json(silent=True) or {}
     prime_url = (data.get('prime_url') or '').strip()
-    if prime_url.lower().startswith("http"):
-        detected = detect_sharepoint_site_root_from_url(prime_url)
-        if detected:
-            get_store().set_sharepoint_site_url(detected)
+    sharing_link_url = (data.get('sharing_link_url') or '').strip()
+    if not sharing_link_url and prime_url and ":f:/" in prime_url.lower():
+        sharing_link_url = prime_url
+    for detect_u in (sharing_link_url, prime_url):
+        if detect_u.lower().startswith("http"):
+            detected = detect_sharepoint_site_root_from_url(detect_u)
+            if detected:
+                get_store().set_sharepoint_site_url(detected)
+                break
 
     if not fedauth or not rtfa:
         return jsonify({'success': False, 'error': 'Please save FedAuth and rtFa first.'}), 401
@@ -397,95 +421,75 @@ def sp_browse():
             ),
         }), 400
 
-    parent = (data.get('parent_rel_url') or '').strip()
-    if "?" in parent:
-        parent = parent.split("?", 1)[0].strip()
-    if not parent.startswith('/'):
-        parent = '/' + parent
+    parent_raw = (data.get('parent_rel_url') or '').strip()
 
-    import requests
-
-    host = urllib.parse.urlparse(sp_site()).netloc
     base = sp_site().rstrip('/')
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json;odata=verbose',
-    })
-    session.cookies.set('FedAuth', fedauth, domain=host, path='/')
-    session.cookies.set('rtFa', rtfa, domain=host, path='/')
+    session = _sp_share_requests_session(sp_site(), fedauth, rtfa, accept_html=False)
+    for warm_url in (sharing_link_url, prime_url):
+        if warm_url.lower().startswith("http"):
+            prime_sharepoint_session_for_browse(
+                session,
+                sp_site(),
+                prime_url=warm_url,
+                fedauth_cookie=fedauth,
+                rtfa_cookie=rtfa,
+            )
 
-    prime_sharepoint_rest_session(session, sp_site(), extra_get_url=prime_url or None)
-
-    enc = urllib.parse.quote(parent)
-    api_root = f"{base}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
-    api_headers = {'Accept': 'application/json;odata=verbose'}
-
-    r_folders = session.get(api_root + '/Folders', headers=api_headers, timeout=60)
-    if r_folders.status_code != 200:
-        snippet = (r_folders.text or '')[:500].replace('\n', ' ')
-        return jsonify({
+    result = list_folder_children_rest(
+        session,
+        base,
+        parent_raw,
+        timeout=60,
+        sharing_link_url=sharing_link_url or None,
+    )
+    if not result.get("ok"):
+        payload = {
             'success': False,
-            'error': f'Folders HTTP {r_folders.status_code}',
-            'parent': parent,
-            'body_snippet': snippet,
-        }), 400
+            'error': result.get('error') or 'Browse failed',
+            'parent': result.get('normalized_parent') or parent_raw,
+            'body_snippet': (result.get('body_snippet') or '')[:500].replace('\n', ' '),
+        }
+        if result.get('content_type'):
+            payload['content_type'] = result['content_type']
+        if result.get('upstream_http_status') is not None:
+            payload['upstream_http_status'] = result['upstream_http_status']
+        if result.get('upstream_http_status') == 403:
+            payload['permission_hint_en'] = (
+                'SharePoint returned 403 (access denied) for this folder listing. '
+                'Paste FedAuth and rtFa from the same browser profile where this link opens while you are signed in, '
+                'then use Resolve link again. If the library belongs to another user, you need their account cookies or an explicit share.'
+            )
+            payload['permission_hint_ar'] = (
+                'رفض SharePoint عرض محتويات المجلد (403). '
+                'الصق FedAuth و rtFa من نفس المتصفح والحساب الذي يفتح الرابط وهو مسجّل، ثم أعد Resolve. '
+                'إن كان المجلد لمستخدم آخر فتحتاج صلاحية مشاركة أو كوكيز ذلك الحساب.'
+            )
+        http_out = result.get('upstream_http_status')
+        if http_out in (401, 403, 404):
+            return jsonify(payload), int(http_out)
+        return jsonify(payload), 400
 
-    r_files = session.get(api_root + '/Files', headers=api_headers, timeout=60)
-    if r_files.status_code != 200:
-        snippet = (r_files.text or '')[:500].replace('\n', ' ')
-        return jsonify({
-            'success': False,
-            'error': f'Files HTTP {r_files.status_code}',
-            'parent': parent,
-            'body_snippet': snippet,
-        }), 400
-
-    try:
-        folders_j = r_folders.json()['d']['results']
-        files_j = r_files.json()['d']['results']
-    except (KeyError, ValueError, TypeError) as e:
-        return jsonify({'success': False, 'error': f'Unexpected API response: {e}', 'parent': parent}), 400
-
-    folders_out = []
-    for fo in folders_j:
-        fn = fo.get('Name') or ''
-        if fn == 'Forms' or fn.startswith('_'):
-            continue
-        folders_out.append({'name': fn, 'rel_url': fo['ServerRelativeUrl']})
-    files_out = []
-    for fi in files_j:
-        files_out.append({
-            'name': fi['Name'],
-            'rel_url': fi['ServerRelativeUrl'],
-            'size': fi.get('Length', 0),
-        })
-
-    return jsonify({
+    folders_out = result['folders']
+    files_out = result['files']
+    norm = result['normalized_parent']
+    out = {
         'success': True,
-        'parent': parent,
+        'parent': norm,
         'folders': folders_out,
         'files': files_out,
-    })
+        'browse_method': result.get('method') or '',
+    }
+    if not folders_out and not files_out:
+        hi = browse_empty_hint_i18n()
+        out["hint_en"] = hi["en"]
+        out["hint_ar"] = hi["ar"]
+    return jsonify(out)
 
 
 @app.route('/sp/explore')
 def sp_explore_page():
-    """Dedicated SharePoint explorer (paste sharing links or relative paths)."""
-    fedauth, rtfa = load_sp_cookies()
-    hint = ""
-    try:
-        for c in load_sp_configs() or []:
-            if c.get('rel_url') and str(c.get('entry_type', 'folder')).lower() != 'file':
-                hint = c['rel_url']
-                break
-    except Exception:
-        pass
-    return render_template(
-        'sp_explore.html',
-        sp_path_hint=hint,
-        sp_auth=bool(fedauth and rtfa),
-    )
+    """SharePoint explorer lives in the main dashboard tab (sidebar)."""
+    return redirect(url_for('index') + '?tab=sp-explore')
 
 
 @app.route('/sp/resolve_url', methods=['POST'])
@@ -525,6 +529,10 @@ def sp_resolve_url():
     payload['success'] = bool(payload.pop('ok', False))
     if not payload['success']:
         payload.setdefault('error', 'Could not resolve URL.')
+    if payload['success'] and url.lower().startswith('http'):
+        from sp_sync.sharepoint.sync_engine import _sp_sharing_url_has_stream_path
+        if _sp_sharing_url_has_stream_path(url):
+            payload.setdefault('sharing_url', url.strip())
     return jsonify(payload)
 
 
@@ -961,3 +969,11 @@ def api_browse_folder():
         return jsonify({'success': True, 'path': folder_selected})
     
     return jsonify({'success': False})
+
+
+if __name__ == "__main__":
+    print("=" * 50)
+    print("  Unified Sync Tool — http://127.0.0.1:5000")
+    print("  Tip: run from repo root with: python app.py")
+    print("=" * 50)
+    app.run(host="127.0.0.1", port=5000, debug=False)

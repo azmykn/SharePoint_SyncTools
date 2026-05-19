@@ -763,18 +763,348 @@ def prime_sharepoint_rest_session(session, sp_site_url, extra_get_url=None):
     session.headers["Accept"] = "application/json;odata=verbose"
 
 
-def _sp_extract_onedrive_id_param(url):
-    """Extract server-relative path from id= / folder= / RootFolder= query (decoded)."""
-    parsed = urllib.parse.urlparse(url)
-    qs = urllib.parse.parse_qs(parsed.query)
-    for key in ("id", "folder", "res", "RootFolder"):
-        if key in qs and qs[key][0].strip():
-            return urllib.parse.unquote(qs[key][0].strip().replace("+", " "))
-    if parsed.fragment:
-        m = re.search(r"(?:^|[&?])id=([^&]+)", parsed.fragment)
-        if m:
-            return urllib.parse.unquote(m.group(1))
+def attach_sharepoint_browser_rest_hints(session, sp_site_url, referer_url=None):
+    """
+    Set headers many SharePoint Online endpoints expect for XHR-style REST calls
+    (reduces 403 UnauthorizedAccessException on /_api/web/.../Folders for some tenants).
+    """
+    ref = (referer_url or "").strip()
+    if not ref.startswith("http"):
+        ref = (sp_site_url or "").strip().rstrip("/") + "/"
+    session.headers["Referer"] = ref
+    session.headers["X-Requested-With"] = "XMLHttpRequest"
+
+
+def try_attach_sharepoint_form_digest(session, sp_site_url, timeout=30):
+    """POST /_api/contextinfo and set X-RequestDigest on session when SharePoint allows it."""
+    base = (sp_site_url or "").strip().rstrip("/")
+    url = base + "/_api/contextinfo"
+    try:
+        r = session.post(
+            url,
+            data="{}",
+            headers={
+                "Accept": "application/json;odata=verbose",
+                "Content-Type": "application/json;odata=verbose",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            return
+        j = r.json()
+        d = j.get("d") or {}
+        gci = d.get("GetContextWebInformation")
+        if isinstance(gci, dict):
+            digest = gci.get("FormDigestValue")
+            if digest:
+                session.headers["X-RequestDigest"] = digest
+    except Exception:
+        pass
+
+
+def extract_request_digest_from_html(html: str) -> str | None:
+    """Parse SharePoint / OneDrive __REQUESTDIGEST from HTML (matches browser X-RequestDigest)."""
+    if not html:
+        return None
+    m = re.search(
+        r'name=["\']__REQUESTDIGEST["\']\s+value=["\']([^"\']+)["\']',
+        html,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip()
+    m = re.search(
+        r'id=["\']__REQUESTDIGEST["\'][^>]*value=["\']([^"\']+)["\']',
+        html,
+        re.I,
+    )
+    if m:
+        return m.group(1).strip()
     return None
+
+
+def apply_sharepoint_page_digest(session, page_url: str, timeout=45) -> None:
+    """GET a SharePoint HTML page and copy __REQUESTDIGEST into session headers when present."""
+    u = (page_url or "").strip()
+    if not u.startswith("http"):
+        return
+    try:
+        prev = session.headers.get("Accept")
+        session.headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        r = session.get(u, timeout=timeout, allow_redirects=True)
+        if prev:
+            session.headers["Accept"] = prev
+        else:
+            session.headers["Accept"] = "application/json;odata=verbose"
+        d = extract_request_digest_from_html(r.text or "")
+        if d:
+            session.headers["X-RequestDigest"] = d
+    except Exception:
+        try:
+            session.headers["Accept"] = "application/json;odata=verbose"
+        except Exception:
+            pass
+
+
+def apply_sharepoint_chromium_security_headers(session, sp_site_url: str) -> None:
+    """Optional Sec-Fetch-* / Origin headers some SPO WAFs correlate with real browsers."""
+    try:
+        p = urllib.parse.urlparse((sp_site_url or "").strip())
+        origin = f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
+        if origin:
+            session.headers["Origin"] = origin
+        session.headers.setdefault("Sec-Fetch-Dest", "empty")
+        session.headers.setdefault("Sec-Fetch-Mode", "cors")
+        session.headers.setdefault("Sec-Fetch-Site", "same-origin")
+    except Exception:
+        pass
+
+
+def prime_sharepoint_session_for_browse(
+    session,
+    sp_site_url: str,
+    *,
+    prime_url: str | None = None,
+    fedauth_cookie: str | None = None,
+    rtfa_cookie: str | None = None,
+) -> None:
+    """
+    Full warm-up for REST browse: HTML prime, browser-like headers, page digest, context digest fallback.
+
+    Resolve only checks GetFolder metadata; listing /Folders is stricter on some tenants.
+    """
+    prime_sharepoint_rest_session(session, sp_site_url, extra_get_url=prime_url)
+    attach_sharepoint_browser_rest_hints(session, sp_site_url, referer_url=prime_url)
+    apply_sharepoint_chromium_security_headers(session, sp_site_url)
+    pu = (prime_url or "").strip()
+    if pu.startswith("http") and "sharepoint.com" in pu.lower():
+        apply_sharepoint_page_digest(session, pu)
+    else:
+        apply_sharepoint_page_digest(session, (sp_site_url or "").strip().rstrip("/") + "/")
+    if not (session.headers.get("X-RequestDigest") or "").strip():
+        try_attach_sharepoint_form_digest(session, sp_site_url)
+    # Mirror auth cookies to parent .sharepoint.com (matches many browser FedAuth domains)
+    if fedauth_cookie and rtfa_cookie:
+        try:
+            host = urllib.parse.urlparse(sp_site_url or "").netloc.lower()
+            if host.endswith(".sharepoint.com"):
+                session.cookies.set("FedAuth", fedauth_cookie, domain=".sharepoint.com", path="/")
+                session.cookies.set("rtFa", rtfa_cookie, domain=".sharepoint.com", path="/")
+        except Exception:
+            pass
+
+
+def _sp_unquote_path_value(raw: str) -> str:
+    """Decode id/folder query values; some tenants double-encode %2F."""
+    s = (raw or "").strip().replace("+", " ")
+    if not s:
+        return ""
+    s = urllib.parse.unquote(s)
+    if "%" in s:
+        s2 = urllib.parse.unquote(s)
+        if s2 != s:
+            s = s2
+    return s
+
+
+def _sp_extract_onedrive_id_param(url):
+    """
+    Extract server-relative path from id= / folder= / RootFolder= / res= query (decoded).
+
+    Keys are matched case-insensitively; fragment is parsed like a query string when it contains '='.
+    """
+    if not (isinstance(url, str) and url.strip()):
+        return None
+    parsed = urllib.parse.urlparse(url.strip())
+    chunks = []
+    if parsed.query:
+        chunks.append(parsed.query)
+    frag = (parsed.fragment or "").lstrip("?")
+    frag_unq = urllib.parse.unquote(frag) if frag else ""
+    if frag_unq and ("=" in frag_unq or "%3d" in frag.lower()):
+        chunks.append(frag_unq)
+    combined = "&".join([c for c in chunks if c])
+    if not combined:
+        return None
+    qs = urllib.parse.parse_qs(combined, keep_blank_values=False)
+    for k, vals in qs.items():
+        lk = (k or "").lower()
+        if lk not in ("id", "folder", "res", "rootfolder"):
+            continue
+        if not vals or not str(vals[0]).strip():
+            continue
+        decoded = _sp_unquote_path_value(str(vals[0]))
+        if decoded:
+            return decoded
+    if frag_unq:
+        for pat in (r"(?:^|[?&])id=([^&]+)", r"(?:^|[?&])folder=([^&]+)", r"(?:^|[?&])rootfolder=([^&]+)"):
+            m = re.search(pat, frag_unq, re.I)
+            if m:
+                decoded = _sp_unquote_path_value(m.group(1))
+                if decoded:
+                    return decoded
+    return None
+
+
+def _sp_extract_server_rel_from_sharepoint_html(html: str) -> str | None:
+    """
+    Best-effort path extraction from OneDrive/SPO HTML after redirects (SPA / mixed markup).
+
+    Looks for serverRelativeUrl / listUrl JSON, og:url / canonical links, and onedrive.aspx id=.
+    """
+    if not html or len(html) < 20:
+        return None
+
+    def _norm_path(s: str) -> str | None:
+        s = (s or "").strip().replace("&amp;", "&").replace("\\/", "/")
+        if not s:
+            return None
+        s = _sp_unquote_path_value(s)
+        if s.startswith("http"):
+            try:
+                p = urllib.parse.urlparse(s)
+                s = _sp_unquote_path_value(p.path or "")
+            except Exception:
+                return None
+        if not s.startswith("/"):
+            s = "/" + s.lstrip("/")
+        low = s.lower()
+        if "/personal/" not in low and "/sites/" not in low:
+            return None
+        return s
+
+    for pat in (
+        r'<meta\s+property=["\']og:url["\']\s+content=["\']([^"\']+)["\']',
+        r'<meta\s+content=["\']([^"\']+)["\']\s+property=["\']og:url["\']',
+        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)["\']',
+        r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']canonical["\']',
+    ):
+        m = re.search(pat, html, re.I)
+        if not m:
+            continue
+        href = m.group(1).strip()
+        cand = _sp_extract_onedrive_id_param(href) or _norm_path(href)
+        if cand:
+            return cand
+
+    for pat in (
+        r'"serverRelativeUrl"\s*:\s*"([^"]+)"',
+        r"'serverRelativeUrl'\s*:\s*'([^']+)'",
+        r'"listUrl"\s*:\s*"([^"]+)"',
+        r"'listUrl'\s*:\s*'([^']+)'",
+    ):
+        m = re.search(pat, html, re.I)
+        if not m:
+            continue
+        cand = _norm_path(m.group(1))
+        if cand:
+            return cand
+
+    for pat in (
+        r'(?:onedrive|embed)\.aspx[^"\'<>\s]*[?&]id=([^&"\'<>\s]+)',
+        r'(?:onedrive|embed)\.aspx[^"\'<>\s]*[?&]folder=([^&"\'<>\s]+)',
+        r'[?&]RootFolder=([^&"\'<>\s]+)',
+    ):
+        m = re.search(pat, html, re.I)
+        if not m:
+            continue
+        cand = _norm_path(m.group(1))
+        if cand:
+            return cand
+
+    return None
+
+
+def _sp_sharing_url_has_stream_path(url: str) -> bool:
+    """OneDrive-style sharing URL path contains :f:/, :w:/, or :x:/ (not plain /personal/...)."""
+    low = (url or "").lower()
+    return ":f:/" in low or ":w:/" in low or ":x:/" in low
+
+
+def _sp_body_indicates_sharing_link_removed(html: str) -> bool:
+    """Detect SharePoint 'link removed / access removed' HTML (EN and common AR phrases)."""
+    if not html:
+        return False
+    low = html.lower()
+    if "this link has been removed" in low:
+        return True
+    if "access to this document has been removed" in low:
+        return True
+    if "the link has been removed" in low:
+        return True
+    if "link has been removed" in low and "sharepoint" in low:
+        return True
+    # Arabic (Microsoft sometimes serves AR pages)
+    if "تمت إزالة هذا الرابط" in html or "تم إزالة هذا الرابط" in html:
+        return True
+    if "لم يعد بإمكانك الوصول" in html and "رابط" in html:
+        return True
+    return False
+
+
+def _sp_resolve_via_v2_share_driveitem(session, sharing_url: str) -> tuple[str | None, int | None]:
+    """
+    Resolve :f:/… / :w:/… sharing URLs via _api/v2.0/shares/u!…/driveItem (no HTML redirect).
+
+    Returns (server_relative_path_or_None, http_status_or_None_on_error).
+    """
+    from sp_sync.sharepoint.rest_folder_list import _v2_share_token_from_url
+
+    u = (sharing_url or "").strip()
+    if not u.startswith("http") or not _sp_sharing_url_has_stream_path(u):
+        return None, None
+    try:
+        p = urllib.parse.urlparse(u)
+        host = (p.netloc or "").lower()
+        if "sharepoint.com" not in host:
+            return None, None
+        sid = _v2_share_token_from_url(u)
+        api = f"{p.scheme}://{p.netloc}/_api/v2.0/shares/{sid}/driveItem"
+        prev_accept = session.headers.get("Accept")
+        session.headers["Accept"] = "application/json"
+        r = session.get(api, timeout=60)
+        st = r.status_code
+        if prev_accept:
+            session.headers["Accept"] = prev_accept
+        else:
+            session.headers["Accept"] = "application/json;odata=verbose"
+        if st != 200:
+            return None, st
+        j = r.json()
+    except Exception:
+        try:
+            session.headers["Accept"] = "application/json;odata=verbose"
+        except Exception:
+            pass
+        return None, None
+
+    if not isinstance(j, dict):
+        return None, None
+
+    for key in ("webUrl", "webDavUrl"):
+        val = j.get(key)
+        if not isinstance(val, str) or not val.strip():
+            continue
+        ex = _sp_extract_onedrive_id_param(val)
+        if ex:
+            return ex, 200
+        pp = urllib.parse.urlparse(val.strip())
+        sp = _sp_server_rel_from_personal_browser_path(pp)
+        if sp:
+            return sp, 200
+
+    spids = j.get("sharepointIds")
+    if isinstance(spids, dict):
+        for sk in ("listPath", "sitePath"):
+            sp_path = spids.get(sk)
+            if isinstance(sp_path, str) and "/personal/" in sp_path.lower():
+                s = sp_path.strip()
+                if not s.startswith("/"):
+                    s = "/" + s.lstrip("/")
+                return urllib.parse.unquote(s), 200
+
+    return None, 200
 
 
 def _sp_server_rel_from_personal_browser_path(parsed_url):
@@ -793,7 +1123,13 @@ def _sp_server_rel_from_personal_browser_path(parsed_url):
 
 
 def _sp_folder_rest_ok(session, sp_base, server_rel):
-    enc = urllib.parse.quote(server_rel)
+    from sp_sync.sharepoint.rest_folder_list import (
+        encode_path_for_get_folder_param,
+        normalize_server_relative_folder_path,
+    )
+
+    norm = normalize_server_relative_folder_path(server_rel)
+    enc = encode_path_for_get_folder_param(norm)
     api = f"{sp_base.rstrip('/')}/_api/web/GetFolderByServerRelativeUrl('{enc}')"
     r = session.get(api, timeout=45)
     return r.status_code == 200
@@ -929,6 +1265,25 @@ def resolve_sharepoint_pasted_url(
             "hint": f"Configured host: {config_host}",
         }
 
+    v2_fail_status = None
+    if _sp_sharing_url_has_stream_path(url):
+        v2_path, v2_st = _sp_resolve_via_v2_share_driveitem(session, url)
+        if v2_st is not None and v2_st != 200:
+            v2_fail_status = v2_st
+        if v2_path:
+            id_v2 = v2_path if v2_path.startswith("/") else "/" + v2_path.lstrip("/")
+            browse = _sp_ensure_browse_folder(session, base, id_v2, log)
+            if browse:
+                return {
+                    "ok": True,
+                    "browse_parent": browse,
+                    "resolved_target": id_v2,
+                    "resolved_from": "v2_share_driveitem",
+                    "final_url": url,
+                    "error": "",
+                    "hint": "",
+                }
+
     id_early = _sp_extract_onedrive_id_param(url)
     if id_early:
         if not id_early.startswith("/"):
@@ -975,24 +1330,69 @@ def resolve_sharepoint_pasted_url(
             "hint": "Check network and cookies.",
         }
     final = r.url or url
-    id_val = _sp_extract_onedrive_id_param(final)
-    if not id_val and r.text:
+    body = r.text or ""
+    urls_chain = []
+    for hist in getattr(r, "history", []) or []:
+        hu = getattr(hist, "url", None) or ""
+        if hu and hu not in urls_chain:
+            urls_chain.append(hu)
+    if final and final not in urls_chain:
+        urls_chain.append(final)
+
+    id_val = None
+    for u in urls_chain:
+        id_val = _sp_extract_onedrive_id_param(u)
+        if id_val:
+            final = u
+            break
+
+    if not id_val and body:
         m = re.search(
             r"(?:onedrive\.aspx|embed\.aspx)\?[^\"'>]*\bid=([^&\"'>\s]+)",
-            r.text,
+            body,
             re.I,
         )
         if m:
-            raw_id = m.group(1).replace("&amp;", "&")
-            id_val = urllib.parse.unquote(raw_id)
+            id_val = _sp_unquote_path_value(m.group(1).replace("&amp;", "&"))
+
+    if not id_val and body:
+        id_val = _sp_extract_server_rel_from_sharepoint_html(body)
+
     if not id_val:
-        for hist in getattr(r, "history", []) or []:
-            id_val = _sp_extract_onedrive_id_param(hist.url)
-            if id_val:
-                final = hist.url
+        for u in reversed(urls_chain):
+            sp = _sp_server_rel_from_personal_browser_path(urllib.parse.urlparse(u))
+            if sp:
+                id_val = sp
+                final = u
                 break
 
     if not id_val:
+        if v2_fail_status == 404 or _sp_body_indicates_sharing_link_removed(body):
+            return {
+                "ok": False,
+                "browse_parent": None,
+                "resolved_target": None,
+                "resolved_from": "",
+                "final_url": final,
+                "error": "Sharing link is invalid, expired, or was removed by the owner",
+                "hint": (
+                    "Microsoft returned a removed/invalid link (or 404 on shares API). Ask the owner for a new link, "
+                    "or open the folder in the browser while signed in and paste the server path (id= / /personal/…)."
+                ),
+            }
+        if v2_fail_status == 403:
+            return {
+                "ok": False,
+                "browse_parent": None,
+                "resolved_target": None,
+                "resolved_from": "",
+                "final_url": final,
+                "error": "Could not access this sharing link with the current session (403)",
+                "hint": (
+                    "Paste FedAuth and rtFa from the same browser where the link opens while you are signed in, "
+                    "then try Resolve again. Ensure the configured site URL host matches this link."
+                ),
+            }
         return {
             "ok": False,
             "browse_parent": None,
@@ -1000,7 +1400,10 @@ def resolve_sharepoint_pasted_url(
             "resolved_from": "",
             "final_url": final,
             "error": "Could not extract folder/file path after redirect",
-            "hint": "Open the link signed in, copy id= from the address bar (starts with /personal/) and paste as a relative path.",
+            "hint": (
+                "Open the link while signed in, then copy the server path: from the address bar use id=, folder=, or "
+                "RootFolder= (decoded path starting with /personal/…), or paste that path directly as a relative path."
+            ),
         }
 
     if not id_val.startswith("/"):
@@ -1242,11 +1645,17 @@ def sync_sharepoint_single_file(
 
 def _sync_folder_recursive(session, page, sp_site_url, folder_rel_url, download_dir, log):
     """Internal recursive folder sync."""
+    from sp_sync.sharepoint.rest_folder_list import (
+        encode_path_for_get_folder_param,
+        normalize_server_relative_folder_path,
+    )
+
     os.makedirs(download_dir, exist_ok=True)
 
     api_headers = {"Accept": "application/json;odata=verbose"}
     base_site = (sp_site_url or get_sp_site_url()).rstrip("/")
-    folder_url_enc = urllib.parse.quote(folder_rel_url)
+    norm_folder = normalize_server_relative_folder_path(folder_rel_url)
+    folder_url_enc = encode_path_for_get_folder_param(norm_folder)
     folder_api_url = f"{base_site}/_api/web/GetFolderByServerRelativeUrl('{folder_url_enc}')"
 
     # 1. Fetch files

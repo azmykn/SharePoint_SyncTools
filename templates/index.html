@@ -301,19 +301,19 @@
     <div class="sidebar">
         <div class="brand" id="i18n-brand">🚀 Unified Sync</div>
         
-        <div class="nav-item active" onclick="switchTab('sp-tab', this)">
+        <div class="nav-item active" id="nav-sp" onclick="switchTab('sp-tab', this)">
             <span>🌐</span> <span id="i18n-navSp">SharePoint</span>
         </div>
-        <a href="/sp/explore" class="nav-item" style="text-decoration:none;color:inherit;display:flex;align-items:center;gap:10px;">
+        <div class="nav-item" id="nav-explore" onclick="switchTab('sp-explore-tab', this)">
             <span>🔎</span> <span id="i18n-navExplore">SharePoint explorer</span>
-        </a>
-        <div class="nav-item" onclick="switchTab('gd-tab', this)">
+        </div>
+        <div class="nav-item" id="nav-gd" onclick="switchTab('gd-tab', this)">
             <span>📁</span> <span id="i18n-navGd">Google Drive</span>
         </div>
-        <div class="nav-item" onclick="switchTab('settings-tab', this)">
+        <div class="nav-item" id="nav-settings" onclick="switchTab('settings-tab', this)">
             <span>⚙️</span> <span id="i18n-navSettings">Connection settings</span>
         </div>
-        <div class="nav-item" onclick="switchTab('logs-tab', this)">
+        <div class="nav-item" id="nav-logs" onclick="switchTab('logs-tab', this)">
             <span>📝</span> <span id="i18n-navLogs">Activity log</span>
         </div>
     </div>
@@ -383,9 +383,9 @@
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 14px; line-height: 1.55;">
                         Full sharing links (<code dir="ltr" style="font-size:0.8rem;">https://…/:f:/g/personal/…?e=…</code>)
                         <strong>cannot</strong> be used directly as the relative URL field — the server must resolve them first.
-                        Open the <strong>explorer page</strong>, paste the link, browse folders/files, then add targets to sync.
+                        Open <strong>SharePoint explorer</strong> from the sidebar, paste the link, browse folders/files, then add targets to sync.
                     </p>
-                    <a href="/sp/explore" class="btn">Open SharePoint explorer</a>
+                    <button type="button" class="btn" onclick="switchTab('sp-explore-tab', document.getElementById('nav-explore'))">Open SharePoint explorer</button>
                 </div>
 
                 <div class="card">
@@ -394,6 +394,10 @@
                         <!-- Loaded via JS -->
                     </div>
                 </div>
+            </div>
+
+            <div id="sp-explore-tab" class="tab-content">
+                {% include '_sp_explore_inner.html' %}
             </div>
 
             <!-- Google Drive Tab -->
@@ -546,6 +550,7 @@
             
             const tabKeys = {
                 'sp-tab': 'tabSpTitle',
+                'sp-explore-tab': 'tabExploreTitle',
                 'gd-tab': 'tabGdTitle',
                 'settings-tab': 'tabSettingsTitle',
                 'logs-tab': 'tabLogsTitle'
@@ -557,7 +562,7 @@
                 const lang = window.UI_LOCALE.getLang();
                 title.textContent = window.UI_LOCALE.T[lang][key] || window.UI_LOCALE.T.en[key];
             } else {
-                const titles = { 'sp-tab': 'SharePoint', 'gd-tab': 'Google Drive', 'settings-tab': 'Connection settings', 'logs-tab': 'Activity log' };
+                const titles = { 'sp-tab': 'SharePoint', 'sp-explore-tab': 'SharePoint explorer', 'gd-tab': 'Google Drive', 'settings-tab': 'Connection settings', 'logs-tab': 'Activity log' };
                 title.textContent = titles[tabId];
             }
             if (window.UI_LOCALE) window.UI_LOCALE.apply();
@@ -879,7 +884,7 @@
                 const data = await res.json();
                 if(data.success) {
                     showToast('Sync started in background');
-                    switchTab('logs-tab', document.querySelectorAll('.nav-item')[3]);
+                    switchTab('logs-tab', document.getElementById('nav-logs'));
                 } else {
                     showToast(data.error || 'Unexpected error', true);
                 }
@@ -985,6 +990,17 @@
         setInterval(refreshLogs, 2000);
         refreshLogs();
 
+        (function applyUrlTab() {
+            try {
+                const p = new URLSearchParams(window.location.search);
+                if (p.get('tab') === 'sp-explore') {
+                    const el = document.getElementById('nav-explore');
+                    if (el) switchTab('sp-explore-tab', el);
+                }
+            } catch (e) {}
+        })();
+
     </script>
+    {% include '_sp_explore_script.html' %}
 </body>
 </html>

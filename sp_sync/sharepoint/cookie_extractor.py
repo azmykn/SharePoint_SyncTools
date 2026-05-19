@@ -1,8 +1,10 @@
 """
 SharePoint Cookie Auto-Extractor (v2)
 ======================================
-Extracts FedAuth/rtFa cookies from Edge/Chrome using direct DPAPI decryption.
-Works even when the browser is running (copies the cookie DB first).
+Extracts FedAuth/rtFa cookies from Edge/Chrome on **Windows** using DPAPI + Chromium cookie DB copy.
+
+On Linux/macOS automatic extraction is not supported (different OS key storage); use the web UI
+to paste FedAuth and rtFa manually after copying them from the browser.
 """
 
 import os
@@ -205,10 +207,28 @@ def _extract_from_browser(browser_name, user_data_dir, local_state_path):
 
 
 def extract_sp_cookies():
-    """Extract SharePoint cookies from Edge or Chrome browser."""
+    """Extract SharePoint cookies from Edge or Chrome browser (Windows only)."""
     result = {'fedauth': '', 'rtfa': '', 'source': '', 'error': '', 'details': []}
-    
-    local_app_data = os.environ.get('LOCALAPPDATA', '')
+
+    if sys.platform != "win32":
+        result['details'].append(
+            "This OS: automatic extraction is not available (Windows Chrome/Edge only)."
+        )
+        result['error'] = (
+            "Automatic cookie extraction works only on Windows with Chrome or Edge. "
+            "On Linux/macOS: open SharePoint in the browser, use DevTools (Application → Cookies) "
+            "or an extension to copy FedAuth and rtFa, then paste them under Connection settings in this app."
+        )
+        return result
+
+    local_app_data = os.environ.get('LOCALAPPDATA', '').strip()
+    if not local_app_data:
+        result['details'].append("LOCALAPPDATA is not set; cannot locate Chrome/Edge profiles.")
+        result['error'] = (
+            "Cannot find Windows user profile paths for browsers. "
+            "If you use WSL, run the app on Windows or paste cookies manually in Connection settings."
+        )
+        return result
     
     browsers = [
         (
