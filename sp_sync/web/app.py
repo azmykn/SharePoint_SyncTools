@@ -247,11 +247,16 @@ def index():
             sp_path_hint = c['rel_url']
             break
 
+    import sys as _sys
+
     return render_template('index.html',
         fedauth=fedauth,
         rtfa=rtfa,
-        sp_auth=bool(fedauth),
+        fedauth_len=len(fedauth),
+        rtfa_len=len(rtfa),
+        sp_auth=bool(fedauth and rtfa),
         sp_explore_auth=bool(fedauth and rtfa),
+        sp_auto_cookies_supported=_sys.platform == "win32",
         sp_path_hint=sp_path_hint,
         sp_folders=sp_configs,
         gd_folders=gdrive_configs,
