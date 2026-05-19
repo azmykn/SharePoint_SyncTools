@@ -1592,10 +1592,32 @@ def sync_sharepoint_files(
         fedauth_cookie, rtfa_cookie, sp_site_url, log
     )
 
+    guest = load_guest_link()
+    share_u = guest.strip() if _sp_sharing_url_has_stream_path(guest) else ""
+    base = (sp_site_url or get_sp_site_url()).rstrip("/")
+    for warm in (share_u, guest.strip(), base + "/"):
+        if warm and str(warm).startswith("http"):
+            prime_sharepoint_session_for_browse(
+                session,
+                base,
+                prime_url=warm,
+                fedauth_cookie=fedauth_cookie,
+                rtfa_cookie=rtfa_cookie,
+            )
+
     target_dir = _mirror_local_root(
         download_dir, folder_rel_url, bool(local_flat), log
     )
-    return _sync_folder_recursive(session, page, sp_site_url, folder_rel_url, target_dir, log)
+    return _sync_folder_recursive(
+        session,
+        page,
+        sp_site_url,
+        folder_rel_url,
+        target_dir,
+        log,
+        sharing_link_url=share_u or None,
+        use_sharing_link=True,
+    )
 
 
 def sync_sharepoint_single_file(
@@ -1643,35 +1665,53 @@ def sync_sharepoint_single_file(
     )
 
 
-def _sync_folder_recursive(session, page, sp_site_url, folder_rel_url, download_dir, log):
-    """Internal recursive folder sync."""
-    from sp_sync.sharepoint.rest_folder_list import (
-        encode_path_for_get_folder_param,
-        normalize_server_relative_folder_path,
-    )
+def _sync_folder_recursive(
+    session,
+    page,
+    sp_site_url,
+    folder_rel_url,
+    download_dir,
+    log,
+    *,
+    sharing_link_url: str | None = None,
+    use_sharing_link: bool = False,
+):
+    """Internal recursive folder sync (same listing stack as /sp/browse)."""
+    from sp_sync.sharepoint.rest_folder_list import list_folder_children_rest
 
     os.makedirs(download_dir, exist_ok=True)
 
-    api_headers = {"Accept": "application/json;odata=verbose"}
     base_site = (sp_site_url or get_sp_site_url()).rstrip("/")
-    norm_folder = normalize_server_relative_folder_path(folder_rel_url)
-    folder_url_enc = encode_path_for_get_folder_param(norm_folder)
-    folder_api_url = f"{base_site}/_api/web/GetFolderByServerRelativeUrl('{folder_url_enc}')"
-
-    # 1. Fetch files
-    response = session.get(folder_api_url + "/Files", headers=api_headers)
-    if response.status_code != 200:
-        log(f"HTTP {response.status_code} for folder {folder_rel_url}")
-        if response.status_code == 403:
-            log("Cookies may be expired — paste fresh FedAuth/rtFa in settings.")
+    share_for_list = (sharing_link_url or "").strip() if use_sharing_link else ""
+    listing = list_folder_children_rest(
+        session,
+        base_site,
+        folder_rel_url,
+        timeout=120,
+        sharing_link_url=share_for_list or None,
+    )
+    if not listing.get("ok"):
+        err = listing.get("error") or "Folder listing failed"
+        log(f"❌ Cannot list {folder_rel_url}: {err}")
+        st = listing.get("upstream_http_status")
+        if st:
+            log(f"   HTTP {st}")
+        snippet = (listing.get("body_snippet") or "").strip()
+        if snippet:
+            log(f"   Server: {snippet[:240]}")
+        if st in (401, 403) or "403" in err or "401" in err:
+            log(
+                "   Paste fresh FedAuth/rtFa from the browser that opens this folder, "
+                "or save a :f:/ guest link for sync warm-up."
+            )
         return 0
 
-    files = response.json()['d']['results']
     downloaded_count = 0
-
-    for f in files:
-        name = f['Name']
-        rel_url = f['ServerRelativeUrl']
+    for file_row in listing.get("files") or []:
+        name = file_row.get("name") or ""
+        rel_url = file_row.get("rel_url") or ""
+        if not name or not rel_url:
+            continue
         local_path = os.path.join(download_dir, name)
         downloaded_count += _download_one_file(
             session,
@@ -1682,17 +1722,26 @@ def _sync_folder_recursive(session, page, sp_site_url, folder_rel_url, download_
             log,
             allow_non_mp4=False,
         )
-    response_folders = session.get(folder_api_url + "/Folders", headers=api_headers)
-    if response_folders.status_code == 200:
-        folders = response_folders.json()['d']['results']
-        for folder in folders:
-            folder_name = folder['Name']
-            if folder_name == "Forms" or folder_name.startswith('_'):
-                continue
-            sub_rel_url = folder['ServerRelativeUrl']
-            sub_dir = os.path.join(download_dir, folder_name)
-            log(f"\n📁 {folder_name}")
-            downloaded_count += _sync_folder_recursive(session, page, sp_site_url, sub_rel_url, sub_dir, log)
+
+    for folder_row in listing.get("folders") or []:
+        folder_name = folder_row.get("name") or ""
+        sub_rel_url = folder_row.get("rel_url") or ""
+        if not folder_name or not sub_rel_url:
+            continue
+        if folder_name == "Forms" or folder_name.startswith("_"):
+            continue
+        sub_dir = os.path.join(download_dir, folder_name)
+        log(f"\n📁 {folder_name}")
+        downloaded_count += _sync_folder_recursive(
+            session,
+            page,
+            sp_site_url,
+            sub_rel_url,
+            sub_dir,
+            log,
+            sharing_link_url=sharing_link_url,
+            use_sharing_link=False,
+        )
 
     return downloaded_count
 
