@@ -43,8 +43,8 @@ class ConfigValidator:
         rel_url = config['rel_url']
         if not rel_url.startswith('/'):
             errors.append("rel_url must start with '/'")
-        elif 'personal' not in rel_url:
-            warnings.append("rel_url does not contain 'personal' — may be wrong")
+        elif not any(seg in rel_url.lower() for seg in ('personal', 'sites/', 'teams/')):
+            warnings.append("rel_url does not contain 'personal', 'sites/', or 'teams/' — verify it is a valid SharePoint path")
         
         # Validate local path (relative paths are normalized in fix_common_issues / save)
         local_path = os.path.abspath(

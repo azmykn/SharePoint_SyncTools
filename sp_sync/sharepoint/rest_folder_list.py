@@ -85,22 +85,33 @@ def extract_embedded_expand_results(payload: dict[str, Any], key: str) -> list[d
     return None
 
 
+class ODataFetchResult(tuple):
+    """3-tuple (items, status_code, error) with content_type attribute for backward compatibility."""
+
+    def __new__(cls, items: list[dict[str, Any]] | None, status_code: int, error: str, content_type: str | None = None):
+        return super().__new__(cls, (items, status_code, error))
+
+    def __init__(self, items: list[dict[str, Any]] | None, status_code: int, error: str, content_type: str | None = None):
+        self.content_type = content_type
+
+
 def fetch_odata_collection_all_pages(
     session,
     start_url: str,
     headers: dict[str, str] | None,
     *,
     timeout: int = 60,
-) -> tuple[list[dict[str, Any]] | None, int, str]:
+) -> ODataFetchResult:
     """
     GET a collection URL and follow SharePoint verbose __next until exhausted or caps hit.
 
-    Returns (items_or_None, last_http_status, error_text).
+    Returns ODataFetchResult(items_or_None, last_http_status, error_text) with .content_type.
     """
     items: list[dict[str, Any]] = []
     url: str | None = start_url
     pages = 0
     last_status = 0
+    content_type: str | None = None
 
     while url and pages < _MAX_PAGES and len(items) < _MAX_ITEMS:
         pages += 1
@@ -109,13 +120,14 @@ def fetch_odata_collection_all_pages(
             req_kw["headers"] = headers
         r = session.get(url, **req_kw)
         last_status = r.status_code
+        content_type = (r.headers.get("Content-Type") or "").split(";")[0].strip() or None
         if r.status_code != 200:
-            return None, r.status_code, (r.text or "")[:800]
+            return ODataFetchResult(None, r.status_code, (r.text or "")[:800], content_type)
 
         try:
             payload = r.json()
         except ValueError:
-            return None, r.status_code, "Invalid JSON in collection response"
+            return ODataFetchResult(None, r.status_code, "Invalid JSON in collection response", content_type)
 
         page_items, nxt = _parse_collection_page(payload)
         items.extend(page_items)
@@ -124,9 +136,9 @@ def fetch_odata_collection_all_pages(
         url = nxt.strip()
 
     if len(items) >= _MAX_ITEMS:
-        return items, last_status, ""
+        return ODataFetchResult(items, last_status, "", content_type)
 
-    return items, last_status, ""
+    return ODataFetchResult(items, last_status, "", content_type)
 
 
 def _nfc(s: str) -> str:
@@ -171,16 +183,13 @@ def _fetch_split_children_by_urls(
     """
     GET explicit Folders and Files collection URLs (with pagination). Returns ok + raw lists or error fields.
     """
-    folders_raw, st_f, err_f = fetch_odata_collection_all_pages(
+    res_f = fetch_odata_collection_all_pages(
         session, folders_url, headers, timeout=timeout
     )
+    folders_raw, st_f, err_f = res_f
     if folders_raw is None:
         snippet = err_f.replace("\n", " ")[:500]
-        req_kw = {"timeout": timeout}
-        if headers is not None:
-            req_kw["headers"] = headers
-        r0 = session.get(folders_url, **req_kw)
-        ct = (r0.headers.get("Content-Type") or "").split(";")[0].strip() or None
+        ct = getattr(res_f, "content_type", None)
         return {
             "ok": False,
             "folders_raw": [],
@@ -191,16 +200,13 @@ def _fetch_split_children_by_urls(
             "upstream_http_status": st_f,
         }
 
-    files_raw, st_fl, err_fl = fetch_odata_collection_all_pages(
+    res_fl = fetch_odata_collection_all_pages(
         session, files_url, headers, timeout=timeout
     )
+    files_raw, st_fl, err_fl = res_fl
     if files_raw is None:
         snippet = err_fl.replace("\n", " ")[:500]
-        req_kw = {"timeout": timeout}
-        if headers is not None:
-            req_kw["headers"] = headers
-        r1 = session.get(files_url, **req_kw)
-        ct = (r1.headers.get("Content-Type") or "").split(";")[0].strip() or None
+        ct = getattr(res_fl, "content_type", None)
         return {
             "ok": False,
             "folders_raw": folders_raw,
@@ -275,6 +281,42 @@ def _v2_share_token_from_url(sharing_url: str) -> str:
     return "u!" + b64
 
 
+def _v2_shares_children_api_url(
+    site_host_root: str,
+    share_token: str,
+    parent_norm: str,
+    *,
+    parent_item_id: str | None = None,
+    share_root_norm: str | None = None,
+) -> str:
+    """
+    Build v2.0/shares children URL for share root, a subfolder (by item id), or by path under share root.
+    """
+    base = (site_host_root or "").strip().rstrip("/")
+    if parent_item_id:
+        item = urllib.parse.quote(str(parent_item_id).strip(), safe="")
+        return f"{base}/_api/v2.0/shares/{share_token}/driveItem/{item}/children"
+
+    parent = normalize_server_relative_folder_path(parent_norm)
+    root = (
+        normalize_server_relative_folder_path(share_root_norm)
+        if share_root_norm
+        else ""
+    )
+    if root and parent != root:
+        root_prefix = root.rstrip("/") + "/"
+        if parent.startswith(root_prefix) or parent == root.rstrip("/"):
+            rel = parent[len(root.rstrip("/")) :].lstrip("/")
+            if rel:
+                rel_enc = "/".join(
+                    urllib.parse.quote(seg, safe="") for seg in rel.split("/") if seg
+                )
+                return (
+                    f"{base}/_api/v2.0/shares/{share_token}/driveItem:/{rel_enc}:/children"
+                )
+    return f"{base}/_api/v2.0/shares/{share_token}/driveItem/children"
+
+
 def _v2_shares_list_children(
     session,
     site_base_url: str,
@@ -282,6 +324,8 @@ def _v2_shares_list_children(
     parent_norm: str,
     *,
     timeout: int,
+    parent_item_id: str | None = None,
+    share_root_norm: str | None = None,
 ) -> dict[str, Any] | None:
     """
     OneDrive/SPO v2.0 shares API: list children of the drive item backing a sharing link.
@@ -296,63 +340,100 @@ def _v2_shares_list_children(
             return None
         root = f"{p.scheme}://{netloc}"
         sid = _v2_share_token_from_url(sharing_url)
-        url = f"{root}/_api/v2.0/shares/{sid}/driveItem/children"
+        url = _v2_shares_children_api_url(
+            root,
+            sid,
+            parent_norm,
+            parent_item_id=parent_item_id,
+            share_root_norm=share_root_norm,
+        )
         prev_accept = session.headers.get("Accept")
         session.headers["Accept"] = "application/json"
-        r = session.get(url, timeout=timeout)
-        st = r.status_code
-        if prev_accept:
-            session.headers["Accept"] = prev_accept
-        else:
-            session.headers["Accept"] = "application/json;odata=verbose"
-        if st != 200:
-            snippet = (r.text or "")[:500].replace("\n", " ")
-            return {
-                "ok": False,
-                "normalized_parent": normalize_server_relative_folder_path(parent_norm),
-                "folders": [],
-                "files": [],
-                "error": f"Shares API HTTP {st}",
-                "body_snippet": snippet,
-                "content_type": (r.headers.get("Content-Type") or "").split(";")[0].strip() or None,
-                "method": "v2_shares",
-                "upstream_http_status": st,
-            }
-        j = r.json()
-        val = j.get("value")
-        if not isinstance(val, list):
-            val = []
-        parent = normalize_server_relative_folder_path(parent_norm)
-        folders_out: list[dict[str, Any]] = []
-        files_out: list[dict[str, Any]] = []
-        for item in val:
-            if not isinstance(item, dict):
-                continue
-            name = _nfc(item.get("name") or "")
-            if not name or name == "Forms" or name.startswith("_"):
-                continue
-            is_folder = isinstance(item.get("folder"), dict)
-            rel = parent.rstrip("/") + "/" + name
-            if is_folder:
-                folders_out.append({"name": name, "rel_url": rel.replace("\\", "/")})
-            else:
-                sz = item.get("size", 0) or 0
-                files_out.append({"name": name, "rel_url": rel.replace("\\", "/"), "size": sz})
-        return {
-            "ok": True,
-            "normalized_parent": parent,
-            "folders": folders_out,
-            "files": files_out,
-            "error": "",
-            "body_snippet": "",
-            "content_type": (r.headers.get("Content-Type") or "").split(";")[0].strip() or None,
-            "method": "v2_shares",
-        }
-    except Exception:
         try:
-            session.headers["Accept"] = "application/json;odata=verbose"
-        except Exception:
-            pass
+            val: list[dict[str, Any]] = []
+            cur_url: str | None = url
+            pages = 0
+            last_ct = None
+
+            while cur_url and pages < _MAX_PAGES and len(val) < _MAX_ITEMS:
+                pages += 1
+                r = session.get(cur_url, timeout=timeout)
+                st = r.status_code
+                last_ct = (r.headers.get("Content-Type") or "").split(";")[0].strip() or None
+                if st != 200:
+                    snippet = (r.text or "")[:500].replace("\n", " ")
+                    return {
+                        "ok": False,
+                        "normalized_parent": normalize_server_relative_folder_path(parent_norm),
+                        "folders": [],
+                        "files": [],
+                        "error": f"Shares API HTTP {st}",
+                        "body_snippet": snippet,
+                        "content_type": last_ct,
+                        "method": "v2_shares",
+                        "upstream_http_status": st,
+                    }
+                try:
+                    j = r.json()
+                except ValueError:
+                    snippet = (r.text or "")[:500].replace("\n", " ")
+                    return {
+                        "ok": False,
+                        "normalized_parent": normalize_server_relative_folder_path(parent_norm),
+                        "folders": [],
+                        "files": [],
+                        "error": "Shares API returned non-JSON body",
+                        "body_snippet": snippet,
+                        "content_type": last_ct,
+                        "method": "v2_shares",
+                        "upstream_http_status": st,
+                    }
+                batch = j.get("value")
+                if isinstance(batch, list):
+                    val.extend(batch)
+                nxt = j.get("@odata.nextLink") or j.get("odata.nextLink")
+                cur_url = nxt.strip() if isinstance(nxt, str) and nxt.strip() else None
+
+            parent = normalize_server_relative_folder_path(parent_norm)
+            folders_out: list[dict[str, Any]] = []
+            files_out: list[dict[str, Any]] = []
+            for item in val:
+                if not isinstance(item, dict):
+                    continue
+                name = _nfc(item.get("name") or "")
+                if not name or name == "Forms" or name.startswith("_"):
+                    continue
+                is_folder = isinstance(item.get("folder"), dict)
+                rel = parent.rstrip("/") + "/" + name
+                if is_folder:
+                    row = {"name": name, "rel_url": rel.replace("\\", "/")}
+                    item_id = item.get("id")
+                    if isinstance(item_id, str) and item_id.strip():
+                        row["item_id"] = item_id.strip()
+                    folders_out.append(row)
+                else:
+                    sz = item.get("size", 0) or 0
+                    row = {"name": name, "rel_url": rel.replace("\\", "/"), "size": sz}
+                    item_id = item.get("id")
+                    if isinstance(item_id, str) and item_id.strip():
+                        row["item_id"] = item_id.strip()
+                    files_out.append(row)
+            return {
+                "ok": True,
+                "normalized_parent": parent,
+                "folders": folders_out,
+                "files": files_out,
+                "error": "",
+                "body_snippet": "",
+                "content_type": last_ct,
+                "method": "v2_shares",
+            }
+        finally:
+            if prev_accept:
+                session.headers["Accept"] = prev_accept
+            else:
+                session.headers["Accept"] = "application/json;odata=verbose"
+    except Exception:
         return None
 
 
@@ -385,6 +466,8 @@ def list_folder_children_rest(
     *,
     timeout: int = 60,
     sharing_link_url: str | None = None,
+    parent_item_id: str | None = None,
+    share_root_norm: str | None = None,
 ) -> dict[str, Any]:
     """
     List immediate child folders and files under server_relative_folder_path.
@@ -407,7 +490,15 @@ def list_folder_children_rest(
 
     share_u = (sharing_link_url or "").strip()
     if share_u.startswith("http") and _should_try_v2_shares(share_u):
-        v2_first = _v2_shares_list_children(session, base, share_u, norm, timeout=timeout)
+        v2_first = _v2_shares_list_children(
+            session,
+            base,
+            share_u,
+            norm,
+            timeout=timeout,
+            parent_item_id=parent_item_id,
+            share_root_norm=share_root_norm,
+        )
         if v2_first and v2_first.get("ok"):
             return v2_first
         if v2_first and not v2_first.get("ok"):
@@ -454,7 +545,15 @@ def list_folder_children_rest(
     if not split["ok"]:
         su = (sharing_link_url or "").strip()
         if su.startswith("http") and _should_try_v2_shares(su):
-            v2 = _v2_shares_list_children(session, base, su, norm, timeout=timeout)
+            v2 = _v2_shares_list_children(
+                session,
+                base,
+                su,
+                norm,
+                timeout=timeout,
+                parent_item_id=parent_item_id,
+                share_root_norm=share_root_norm,
+            )
             if v2 and v2.get("ok"):
                 return v2
         return {
@@ -503,7 +602,15 @@ def list_folder_children_rest(
     if not folder_rows and not file_rows:
         su = (sharing_link_url or "").strip()
         if su.startswith("http") and _should_try_v2_shares(su):
-            v2 = _v2_shares_list_children(session, base, su, norm, timeout=timeout)
+            v2 = _v2_shares_list_children(
+                session,
+                base,
+                su,
+                norm,
+                timeout=timeout,
+                parent_item_id=parent_item_id,
+                share_root_norm=share_root_norm,
+            )
             if v2 and v2.get("ok"):
                 return v2
 

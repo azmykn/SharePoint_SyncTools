@@ -248,6 +248,7 @@ def index():
             break
 
     import sys as _sys
+    from sp_sync.db.store import get_store
 
     return render_template('index.html',
         fedauth=fedauth,
@@ -265,6 +266,7 @@ def index():
         sync_status=sync_status,
         sp_site_configured=bool(sp_site().strip()),
         sp_site_url_display=sp_site(),
+        sp_guest_link_display=get_store().get_guest_link(),
     )
 
 
@@ -368,6 +370,9 @@ def sp_sync():
             from sp_sync.sharepoint.sync_engine import start_sync_from_config
             total = 0
             for config in sp_configs:
+                if not _sp_sync_enabled(config):
+                    add_log('sharepoint', f"⏭️ Skipped (sync off): {config.get('name', 'SharePoint')}")
+                    continue
                 add_log('sharepoint', f"📂 Syncing: {config['name']}...")
                 count = start_sync_from_config(
                     fedauth, rtfa, sp_site(), config,
@@ -427,6 +432,8 @@ def sp_browse():
         }), 400
 
     parent_raw = (data.get('parent_rel_url') or '').strip()
+    parent_item_id = (data.get('parent_item_id') or '').strip() or None
+    share_browse_root = (data.get('share_browse_root') or '').strip() or None
 
     base = sp_site().rstrip('/')
     session = _sp_share_requests_session(sp_site(), fedauth, rtfa, accept_html=False)
@@ -446,6 +453,8 @@ def sp_browse():
         parent_raw,
         timeout=60,
         sharing_link_url=sharing_link_url or None,
+        parent_item_id=parent_item_id,
+        share_root_norm=share_browse_root,
     )
     if not result.get("ok"):
         payload = {
@@ -501,7 +510,7 @@ def sp_explore_page():
 def sp_resolve_url():
     """Resolve full SharePoint/OneDrive URL to server-relative folder for browsing."""
     from sp_sync.sharepoint.sync_engine import resolve_sharepoint_pasted_url
-    from sp_sync.db.store import get_store
+    from sp_sync.db.store import KEY_GUEST_LINK, get_store
 
     fedauth, rtfa = load_sp_cookies()
     if not fedauth or not rtfa:
@@ -537,7 +546,13 @@ def sp_resolve_url():
     if payload['success'] and url.lower().startswith('http'):
         from sp_sync.sharepoint.sync_engine import _sp_sharing_url_has_stream_path
         if _sp_sharing_url_has_stream_path(url):
-            payload.setdefault('sharing_url', url.strip())
+            share_u = url.strip()
+            payload.setdefault('sharing_url', share_u)
+            get_store().set_text(KEY_GUEST_LINK, share_u)
+            add_log('sharepoint', 'Guest :f:/ link saved from resolve')
+        bp = (payload.get('browse_parent') or '').strip()
+        if bp:
+            payload.setdefault('sharing_root', bp)
     return jsonify(payload)
 
 
@@ -546,6 +561,11 @@ def _normalize_sp_rel_key(u):
     if not u.startswith('/'):
         u = '/' + u
     return u
+
+
+def _sp_sync_enabled(config: dict) -> bool:
+    """Whether this config participates in sync runs (default: enabled)."""
+    return config.get('sync_enabled', True) is not False
 
 
 def _normalize_sp_bulk_item(raw):
@@ -558,6 +578,14 @@ def _normalize_sp_bulk_item(raw):
     out = {'name': name, 'rel_url': rel, 'local_path': local_path, 'entry_type': et}
     if et == 'folder' and 'local_flat' in raw and raw.get('local_flat') is not None:
         out['local_flat'] = raw['local_flat']
+    share = (raw.get('sharing_link') or '').strip()
+    if share.lower().startswith('http'):
+        out['sharing_link'] = share
+    root = (raw.get('sharing_root') or '').strip()
+    if root.startswith('/'):
+        out['sharing_root'] = root
+    if 'sync_enabled' in raw:
+        out['sync_enabled'] = raw['sync_enabled'] is not False
     return out
 
 
@@ -589,7 +617,10 @@ def sp_bulk_add():
     for c in configs:
         ru = _normalize_sp_rel_key(c.get('rel_url', ''))
         if ru in updates:
-            new_list.append(updates[ru])
+            merged = dict(updates[ru])
+            if 'sync_enabled' not in merged and 'sync_enabled' in c:
+                merged['sync_enabled'] = c['sync_enabled']
+            new_list.append(merged)
             applied_urls.add(ru)
         else:
             new_list.append(c)
@@ -631,9 +662,13 @@ def sp_add_folder():
         'rel_url': rel_url,
         'local_path': local_path,
         'entry_type': entry_type,
+        'sync_enabled': data.get('sync_enabled', True) is not False,
     }
     if entry_type == 'folder' and 'local_flat' in data and data.get('local_flat') is not None:
         row['local_flat'] = data['local_flat']
+    share = (data.get('sharing_link') or '').strip()
+    if share.lower().startswith('http'):
+        row['sharing_link'] = share
 
     configs = load_sp_configs()
     configs.append(row)
@@ -685,11 +720,95 @@ def sp_update_folder():
                 row['local_flat'] = data['local_flat']
             elif 'local_flat' in prev:
                 row['local_flat'] = prev['local_flat']
+        share = (data.get('sharing_link') or '').strip()
+        if share.lower().startswith('http'):
+            row['sharing_link'] = share
+        elif 'sharing_link' in prev:
+            row['sharing_link'] = prev['sharing_link']
+        if 'sync_enabled' in prev:
+            row['sync_enabled'] = prev['sync_enabled']
         configs[index] = row
         save_sp_configs(configs)
         add_log('sharepoint', f"📝 Folder updated: {name}")
         return jsonify({'success': True})
     return jsonify({'success': False, 'error': 'Invalid index.'})
+
+
+@app.route('/sp/toggle_sync', methods=['POST'])
+def sp_toggle_sync():
+    """Enable or disable a SharePoint config in sync runs (order unchanged)."""
+    data = request.get_json(silent=True) or {}
+    try:
+        index = int(data.get('index', -1))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'Invalid index.'}), 400
+
+    configs = load_sp_configs()
+    if not (0 <= index < len(configs)):
+        return jsonify({'success': False, 'error': 'Invalid index.'}), 400
+
+    if 'enabled' in data:
+        enabled = data.get('enabled') is not False
+    else:
+        enabled = not _sp_sync_enabled(configs[index])
+
+    configs[index]['sync_enabled'] = enabled
+    save_sp_configs(configs)
+    name = configs[index].get('name', 'SharePoint')
+    if enabled:
+        add_log('sharepoint', f"▶️ Sync enabled: {name}")
+    else:
+        add_log('sharepoint', f"⏸️ Sync paused: {name}")
+    return jsonify({'success': True, 'enabled': enabled, 'index': index})
+
+
+@app.route('/sp/reorder_folders', methods=['POST'])
+def sp_reorder_folders():
+    """Persist SharePoint sync folder order (sync runs top-to-bottom)."""
+    data = request.get_json(silent=True) or {}
+    configs = data.get('configs')
+    if isinstance(configs, list) and configs:
+        normalized = []
+        for raw in configs:
+            if not isinstance(raw, dict):
+                continue
+            n = _normalize_sp_bulk_item(raw)
+            if n['rel_url'] and n['local_path']:
+                if 'sharing_link' not in n and raw.get('sharing_link'):
+                    n['sharing_link'] = (raw.get('sharing_link') or '').strip()
+                normalized.append(n)
+        if not normalized:
+            return jsonify({'success': False, 'error': 'No valid folder entries.'}), 400
+        save_sp_configs(normalized)
+        add_log('sharepoint', f"📋 Sync order updated ({len(normalized)} item(s))")
+        return jsonify({'success': True, 'total': len(normalized)})
+
+    order = data.get('order')
+    current = load_sp_configs()
+    if not isinstance(order, list) or len(order) != len(current):
+        return jsonify({'success': False, 'error': 'Invalid order array.'}), 400
+    try:
+        indices = [int(i) for i in order]
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'Order must be integer indices.'}), 400
+    if sorted(indices) != list(range(len(current))):
+        return jsonify({'success': False, 'error': 'Order must be a permutation of indices.'}), 400
+    reordered = [current[i] for i in indices]
+    save_sp_configs(reordered)
+    add_log('sharepoint', '📋 Sync order updated')
+    return jsonify({'success': True, 'total': len(reordered)})
+
+
+@app.route('/sp/save_guest_link', methods=['POST'])
+def sp_save_guest_link():
+    """Optional :f:/ guest link used to warm session before sync/browse."""
+    from sp_sync.db.store import get_store, KEY_GUEST_LINK
+
+    data = request.get_json(silent=True) or {}
+    link = (data.get('guest_link') or data.get('url') or '').strip()
+    get_store().set_text(KEY_GUEST_LINK, link)
+    add_log('sharepoint', 'Guest share link saved' if link else 'Guest share link cleared')
+    return jsonify({'success': True})
 
 
 # ============================================================
@@ -858,30 +977,36 @@ def sync_all():
     if not sync_status['sharepoint']['running']:
         fedauth, rtfa = load_sp_cookies()
         if fedauth:
-            sp_configs = load_sp_configs()
-            def run_sp():
-                sync_status['sharepoint']['running'] = True
-                add_log('sharepoint', '--- SharePoint sync started ---')
-                try:
-                    from sp_sync.sharepoint.sync_engine import start_sync_from_config
-                    total = 0
-                    for config in sp_configs:
-                        add_log('sharepoint', f"📂 Syncing: {config['name']}...")
-                        count = start_sync_from_config(
-                            fedauth, rtfa, sp_site(), config,
-                            log_callback=lambda msg: add_log('sharepoint', msg))
-                        total += count
-                    result = f"✅ Done. Downloaded {total} new file(s)."
-                    add_log('sharepoint', result)
-                    sync_status['sharepoint']['last_result'] = result
-                except Exception as e:
-                    add_log('sharepoint', f"❌ Error: {e}")
-                    sync_status['sharepoint']['last_result'] = f"❌ Error: {e}"
-                finally:
-                    sync_status['sharepoint']['running'] = False
-                    sync_status['sharepoint']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            threading.Thread(target=run_sp, daemon=True).start()
-            results['sharepoint'] = 'started'
+            if not sp_site():
+                add_log('sharepoint', '⚠️ Cannot start SharePoint sync: site URL is not configured.')
+            else:
+                sp_configs = load_sp_configs()
+                def run_sp():
+                    sync_status['sharepoint']['running'] = True
+                    add_log('sharepoint', '--- SharePoint sync started ---')
+                    try:
+                        from sp_sync.sharepoint.sync_engine import start_sync_from_config
+                        total = 0
+                        for config in sp_configs:
+                            if not _sp_sync_enabled(config):
+                                add_log('sharepoint', f"⏭️ Skipped (sync off): {config.get('name', 'SharePoint')}")
+                                continue
+                            add_log('sharepoint', f"📂 Syncing: {config['name']}...")
+                            count = start_sync_from_config(
+                                fedauth, rtfa, sp_site(), config,
+                                log_callback=lambda msg: add_log('sharepoint', msg))
+                            total += count
+                        result = f"✅ Done. Downloaded {total} new file(s)."
+                        add_log('sharepoint', result)
+                        sync_status['sharepoint']['last_result'] = result
+                    except Exception as e:
+                        add_log('sharepoint', f"❌ Error: {e}")
+                        sync_status['sharepoint']['last_result'] = f"❌ Error: {e}"
+                    finally:
+                        sync_status['sharepoint']['running'] = False
+                        sync_status['sharepoint']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                threading.Thread(target=run_sp, daemon=True).start()
+                results['sharepoint'] = 'started'
     
     # Start GDrive sync if not running
     if not sync_status['gdrive']['running']:
@@ -948,6 +1073,32 @@ def get_logs_text():
     )
 
 
+@app.route('/logs/clear', methods=['POST'])
+def clear_logs_route():
+    """Clear in-memory and persisted log entries (all or one source)."""
+    data = request.get_json(silent=True) or {}
+    source = (data.get('source') or request.args.get('source') or 'all').strip().lower()
+    if source not in ('all', 'sharepoint', 'gdrive', 'system'):
+        return jsonify({'success': False, 'error': 'Invalid source.'}), 400
+
+    try:
+        from sp_sync.db.store import get_store
+        get_store().clear_logs(None if source == 'all' else source)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+    if source == 'all':
+        log_buffer.clear()
+    else:
+        kept = [e for e in log_buffer if e.get('source') != source]
+        log_buffer.clear()
+        log_buffer.extend(kept)
+
+    label = 'all sources' if source == 'all' else source
+    add_log('system', f'🧹 Log cleared ({label})')
+    return jsonify({'success': True, 'source': source})
+
+
 @app.route('/status')
 def get_status():
     """Get current sync status."""
@@ -956,24 +1107,28 @@ def get_status():
 
 @app.route('/api/browse_folder')
 def api_browse_folder():
-    """Open a native folder selection dialog."""
-    import tkinter as tk
-    from tkinter import filedialog
-    
-    root = tk.Tk()
-    root.withdraw()  # Hide the main tkinter window
-    root.attributes("-topmost", True)  # Bring to front
-    
-    folder_selected = filedialog.askdirectory()
-    root.destroy()
-    
-    if folder_selected:
-        # Convert backslashes for JSON/JS safety if needed, 
-        # but Python handles it fine. Let's make it standard Windows style.
-        folder_selected = os.path.normpath(folder_selected)
-        return jsonify({'success': True, 'path': folder_selected})
-    
-    return jsonify({'success': False})
+    """Open a native folder selection dialog (when display is available)."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()  # Hide the main tkinter window
+        root.attributes("-topmost", True)  # Bring to front
+
+        folder_selected = filedialog.askdirectory()
+        root.destroy()
+
+        if folder_selected:
+            folder_selected = os.path.normpath(folder_selected)
+            return jsonify({'success': True, 'path': folder_selected})
+
+        return jsonify({'success': False})
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Native folder dialog unavailable: {e}',
+        }), 200
 
 
 if __name__ == "__main__":

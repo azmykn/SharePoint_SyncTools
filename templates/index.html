@@ -201,8 +201,25 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 10px;
         }
-        .item-info { flex: 1; overflow: hidden; }
+        .item-card.dragging { opacity: 0.45; }
+        .item-card.drag-over { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+        .item-card.item-sync-off { opacity: 0.72; border-style: dashed; }
+        .item-card.item-sync-off .item-title { color: var(--text-muted); }
+        .sync-off-badge { background: rgba(148, 163, 184, 0.2); color: var(--text-muted); }
+        .drag-handle {
+            cursor: grab;
+            color: var(--text-muted);
+            font-size: 1.1rem;
+            line-height: 1;
+            padding: 4px 6px;
+            user-select: none;
+            flex-shrink: 0;
+        }
+        .drag-handle:active { cursor: grabbing; }
+        .sync-order-hint { font-size: 0.85rem; color: var(--text-muted); margin: 0 0 12px; line-height: 1.5; }
+        .item-info { flex: 1; overflow: hidden; min-width: 0; }
         .item-title { font-weight: 600; font-size: 0.95rem; margin-bottom: 2px; }
         .item-subtitle { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .item-actions { display: flex; gap: 6px; flex-shrink: 0; }
@@ -390,6 +407,10 @@
 
                 <div class="card">
                     <div class="card-header">📁 Configured folders</div>
+                    <p class="sync-order-hint" id="sp-sync-order-hint">
+                        <span id="i18n-spSyncOrderHint">Drag rows to set sync order (top = first).</span>
+                        <span id="sp-sync-order-num"></span>
+                    </p>
                     <div class="item-list" id="sp-list">
                         <!-- Loaded via JS -->
                     </div>
@@ -472,13 +493,35 @@
                         </form>
                     </div>
 
+                    <div style="background: rgba(15,23,42,0.35); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+                        <div class="card-header" style="font-size:1rem;">Guest sharing link (optional)</div>
+                        <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 12px; line-height: 1.55;">
+                            Paste the original <code dir="ltr">:f:/</code> link used to open the library. Sync and browse use it when REST returns 403.
+                        </p>
+                        <form onsubmit="saveSpGuestLink(event)">
+                            <div class="form-group" style="margin-bottom: 10px;">
+                                <label>Sharing link</label>
+                                <input type="text" class="form-input" id="sp-guest-link" dir="ltr"
+                                    placeholder="https://…sharepoint.com/:f:/g/…"
+                                    value="{{ sp_guest_link_display }}">
+                            </div>
+                            <button type="submit" class="btn btn-outline">Save guest link</button>
+                        </form>
+                    </div>
+
                     <form onsubmit="updateSPAuth(event)">
                         <div class="form-group" style="margin-bottom: 10px;">
                             <label>FedAuth Cookie</label>
+                            {% if fedauth_len %}
+                            <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 6px;">Saved in app ({{ fedauth_len }} chars). Paste only to replace.</p>
+                            {% endif %}
                             <input type="text" class="form-input" id="sp-fedauth" placeholder="Paste FedAuth value...">
                         </div>
                         <div class="form-group" style="margin-bottom: 10px;">
                             <label>rtFa Cookie</label>
+                            {% if rtfa_len %}
+                            <p style="font-size:0.82rem;color:var(--text-muted);margin:0 0 6px;">Saved in app ({{ rtfa_len }} chars). Paste only to replace.</p>
+                            {% endif %}
                             <input type="text" class="form-input" id="sp-rtfa" placeholder="Paste rtFa value...">
                         </div>
                         <button type="submit" class="btn">Update SharePoint connection (manual)</button>
@@ -490,9 +533,15 @@
                         <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 10px;">
                             Or extract cookies automatically from Chrome/Edge if you are already signed in:
                         </p>
+                        {% if sp_auto_cookies_supported %}
                         <button class="btn" style="background: var(--success);" onclick="autoExtractSPCookies()" id="btn-auto-cookies">
                             🔄 Extract cookies from browser
                         </button>
+                        {% else %}
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">
+                            Automatic cookie extraction is only available on Windows. Paste FedAuth/rtFa manually from DevTools.
+                        </p>
+                        {% endif %}
                     </div>
                     <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: 12px;">
                         Browser-based video capture requires Playwright Chromium once on this machine:
@@ -523,6 +572,7 @@
                     <button class="btn btn-small btn-outline" onclick="filterLogs('sharepoint')">SharePoint</button>
                     <button class="btn btn-small btn-outline" onclick="filterLogs('gdrive')">Google Drive</button>
                     <span style="flex:1"></span>
+                    <button type="button" class="btn btn-small btn-danger" onclick="clearLogs()" title="Clear log entries"><span id="i18n-btnClearLog">🧹 Clear log</span></button>
                     <button type="button" class="btn btn-small" onclick="copyAllLogs()" title="Copy log as plain text">📋 Copy log</button>
                     <button type="button" class="btn btn-small btn-outline" onclick="showPlainLogs()" title="Show selectable plain text">📄 Plain text</button>
                 </div>
@@ -604,28 +654,143 @@
 
         // --- SharePoint ---
         const spFolders = {{ sp_folders|tojson|safe if sp_folders else '[]' }};
+        let spDragFromIndex = null;
+
+        function spSyncEnabled(f) {
+            return f.sync_enabled !== false;
+        }
 
         function renderSPList() {
             const list = document.getElementById('sp-list');
+            const numEl = document.getElementById('sp-sync-order-num');
+            if (numEl) {
+                const enabledCount = spFolders.filter(spSyncEnabled).length;
+                numEl.textContent = spFolders.length
+                    ? `(${enabledCount}/${spFolders.length} enabled for sync)`
+                    : '';
+            }
             list.innerHTML = '';
             spFolders.forEach((f, idx) => {
-                const el = document.createElement('div'); el.className = 'item-card';
+                const enabled = spSyncEnabled(f);
+                const el = document.createElement('div');
+                el.className = 'item-card' + (enabled ? '' : ' item-sync-off');
+                el.draggable = true;
+                el.dataset.index = String(idx);
                 const badge =
                     (f.entry_type === 'file')
                         ? '<span class="entry-type-badge">File</span>'
                         : (f.local_flat ? '<span class="entry-type-badge">Flat</span>' : '');
+                const orderBadge = `<span class="entry-type-badge" style="opacity:0.85">#${idx + 1}</span>`;
+                const pausedBadge = enabled ? '' : '<span class="entry-type-badge sync-off-badge">Paused</span>';
+                const syncBtnTitle = enabled ? 'Pause sync for this item' : 'Enable sync for this item';
+                const syncBtnClass = enabled ? 'btn btn-small' : 'btn btn-small btn-outline';
+                const syncBtnIcon = enabled ? '⏸' : '▶';
                 el.innerHTML = `
+                    <span class="drag-handle" title="Drag to reorder" aria-hidden="true">⋮⋮</span>
                     <div class="item-info">
-                        <div class="item-title">${badge}${escapeHtml(f.name)}</div>
+                        <div class="item-title">${orderBadge}${pausedBadge}${badge}${escapeHtml(f.name)}</div>
                         <div class="item-subtitle">${escapeHtml(f.rel_url)} ➔ ${escapeHtml(f.local_path)}</div>
                     </div>
                     <div class="item-actions">
-                        <button class="btn btn-small btn-outline" onclick="editSP(${idx})">✏️</button>
-                        <button class="btn btn-small btn-danger" onclick="deleteSP(${idx})">🗑️</button>
+                        <button type="button" class="${syncBtnClass}" onclick="toggleSpSync(${idx})" title="${syncBtnTitle}">${syncBtnIcon}</button>
+                        <button type="button" class="btn btn-small btn-outline" onclick="editSP(${idx})">✏️</button>
+                        <button type="button" class="btn btn-small btn-danger" onclick="deleteSP(${idx})">🗑️</button>
                     </div>
                 `;
+                el.addEventListener('dragstart', (e) => {
+                    spDragFromIndex = idx;
+                    el.classList.add('dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                    try { e.dataTransfer.setData('text/plain', String(idx)); } catch (_) {}
+                });
+                el.addEventListener('dragend', () => {
+                    el.classList.remove('dragging');
+                    spDragFromIndex = null;
+                    list.querySelectorAll('.item-card.drag-over').forEach((n) => n.classList.remove('drag-over'));
+                });
+                el.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    el.classList.add('drag-over');
+                });
+                el.addEventListener('dragleave', () => el.classList.remove('drag-over'));
+                el.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    el.classList.remove('drag-over');
+                    const toIdx = idx;
+                    if (spDragFromIndex === null || spDragFromIndex === toIdx) return;
+                    const moved = spFolders.splice(spDragFromIndex, 1)[0];
+                    spFolders.splice(toIdx, 0, moved);
+                    spDragFromIndex = null;
+                    renderSPList();
+                    persistSpFolderOrder();
+                });
                 list.appendChild(el);
             });
+        }
+
+
+        async function saveSpGuestLink(e) {
+            e.preventDefault();
+            const link = document.getElementById('sp-guest-link').value.trim();
+            try {
+                const res = await fetch('/sp/save_guest_link', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ guest_link: link }),
+                });
+                const data = await res.json();
+                if (data.success) showToast(link ? 'Guest link saved' : 'Guest link cleared');
+                else showToast(data.error || 'Save failed', true);
+            } catch (_) {
+                showToast('Save failed', true);
+            }
+        }
+
+        async function toggleSpSync(idx) {
+            const enabled = !spSyncEnabled(spFolders[idx]);
+            try {
+                const res = await fetch('/sp/toggle_sync', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ index: idx, enabled }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    spFolders[idx].sync_enabled = data.enabled;
+                    renderSPList();
+                    const lang = window.UI_LOCALE && window.UI_LOCALE.getLang();
+                    const T = window.UI_LOCALE && window.UI_LOCALE.T;
+                    const key = data.enabled ? 'spSyncEnabled' : 'spSyncPaused';
+                    const msg = (T && T[lang] && T[lang][key]) || (data.enabled ? 'Sync enabled' : 'Sync paused');
+                    showToast(msg);
+                } else {
+                    showToast(data.error || 'Could not update sync', true);
+                }
+            } catch (_) {
+                showToast('Could not update sync', true);
+            }
+        }
+
+        async function persistSpFolderOrder() {
+            try {
+                const res = await fetch('/sp/reorder_folders', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ configs: spFolders }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    const lang = window.UI_LOCALE && window.UI_LOCALE.getLang();
+                    const msg = (window.UI_LOCALE && window.UI_LOCALE.T[lang] && window.UI_LOCALE.T[lang].spOrderSaved)
+                        || 'Sync order saved';
+                    showToast(msg);
+                } else {
+                    showToast(data.error || 'Could not save order', true);
+                }
+            } catch (_) {
+                showToast('Could not save order', true);
+            }
         }
 
         function editSP(idx) {
@@ -967,6 +1132,33 @@
                     showToast('Ctrl+A then Ctrl+C to copy');
                 })
                 .catch(() => showToast('Could not load log', true));
+        }
+
+        async function clearLogs() {
+            const lang = window.UI_LOCALE && window.UI_LOCALE.getLang();
+            const T = window.UI_LOCALE && window.UI_LOCALE.T;
+            const confirmMsg = (T && T[lang] && T[lang].logClearConfirm)
+                || 'Clear log entries for the current filter?';
+            if (!confirm(confirmMsg)) return;
+            try {
+                const res = await fetch('/logs/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source: currentLogFilter }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('log-plain-fallback').style.display = 'none';
+                    document.getElementById('log-plain-fallback').value = '';
+                    await refreshLogs();
+                    const done = (T && T[lang] && T[lang].logCleared) || 'Log cleared';
+                    showToast(done);
+                } else {
+                    showToast(data.error || 'Could not clear log', true);
+                }
+            } catch (_) {
+                showToast('Could not clear log', true);
+            }
         }
 
         async function refreshLogs() {

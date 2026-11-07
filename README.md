@@ -96,9 +96,10 @@ Set `ANALYZE_SP_URL`, `ANALYZE_SP_SITE`, and `ANALYZE_SP_REL` (see script docstr
 
 ### Local tests
 
+Run the complete test suite:
+
 ```bash
-python tests/test_enhancements.py
-python tests/test_cookies.py
+python -m unittest discover -s tests -v
 ```
 
 ## Project layout

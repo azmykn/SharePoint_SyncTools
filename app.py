@@ -15,9 +15,11 @@ if ROOT not in sys.path:
 from sp_sync.web.app import app
 
 if __name__ == "__main__":
+    host = os.environ.get("SP_SYNC_HOST", "127.0.0.1")
+    port = int(os.environ.get("SP_SYNC_PORT", os.environ.get("PORT", "5000")))
     print("=" * 50)
     print("  Unified Sync Tool")
     print("  SharePoint + Google Drive")
-    print("  http://localhost:5000")
+    print(f"  http://{host}:{port}")
     print("=" * 50)
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host=host, port=port, debug=False)

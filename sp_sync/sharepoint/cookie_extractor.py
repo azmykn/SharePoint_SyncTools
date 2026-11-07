@@ -62,10 +62,17 @@ def _decrypt_cookie_value(encrypted_value, key):
             nonce = encrypted_value[3:15]
             ciphertext = encrypted_value[15:-16]
             tag = encrypted_value[-16:]
-            
-            from Cryptodome.Cipher import AES
-            cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-            return cipher.decrypt_and_verify(ciphertext, tag).decode('utf-8')
+
+            try:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+                aesgcm = AESGCM(key)
+                return aesgcm.decrypt(nonce, encrypted_value[15:], None).decode('utf-8')
+            except ImportError:
+                from Cryptodome.Cipher import AES
+
+                cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+                return cipher.decrypt_and_verify(ciphertext, tag).decode('utf-8')
         else:
             # Old DPAPI encryption
             import ctypes

@@ -101,7 +101,24 @@ def load_guest_link():
     g = get_default_guest_link()
     if g.startswith("http"):
         return g
-    return get_sp_site_url()
+    return ""
+
+
+def _playwright_page_is_login_wall(page) -> bool:
+    """True when Playwright landed on Microsoft sign-in instead of SharePoint content."""
+    try:
+        url = (page.url or "").lower()
+        if "login.microsoftonline.com" in url or "login.live.com" in url:
+            return True
+        title = (page.title() or "").lower()
+        if "sign in" in title or "تسجيل الدخول" in title:
+            return True
+        body = page.content()[:8000].lower()
+        if "login.microsoftonline.com" in body and "fedauth" not in body[:4000]:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _sharepoint_cookie_host(sp_site_url):
@@ -147,8 +164,20 @@ FFMPEG_PATH = None
 FFMPEG_DIR = None
 
 
+def _project_ffmpeg_candidates():
+    """Bundled ffmpeg under repo data/bin (optional manual install)."""
+    root = project_root()
+    names = ("ffmpeg", "ffmpeg.exe")
+    for sub in ("data/bin", "bin", "tools/ffmpeg"):
+        folder = os.path.join(root, sub)
+        for name in names:
+            path = os.path.join(folder, name)
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                yield path
+
+
 def resolve_ffmpeg_path(log=print):
-    """Resolve ffmpeg binary: $FFMPEG_PATH, PATH, then common Windows install."""
+    """Resolve ffmpeg: $FFMPEG_PATH, PATH, imageio-ffmpeg bundle, project bin, Windows."""
     global FFMPEG_PATH, FFMPEG_DIR
     if FFMPEG_PATH and os.path.isfile(FFMPEG_PATH):
         return FFMPEG_PATH
@@ -160,6 +189,20 @@ def resolve_ffmpeg_path(log=print):
     if which:
         FFMPEG_PATH, FFMPEG_DIR = which, os.path.dirname(which)
         return FFMPEG_PATH
+    for bundled in _project_ffmpeg_candidates():
+        FFMPEG_PATH, FFMPEG_DIR = bundled, os.path.dirname(bundled)
+        return FFMPEG_PATH
+    try:
+        import imageio_ffmpeg
+
+        bundled = imageio_ffmpeg.get_ffmpeg_exe()
+        if bundled and os.path.isfile(bundled):
+            FFMPEG_PATH, FFMPEG_DIR = bundled, os.path.dirname(bundled)
+            return FFMPEG_PATH
+    except ImportError:
+        pass
+    except Exception:
+        pass
     win_guess = os.path.join(
         os.environ.get("LOCALAPPDATA", ""),
         "Microsoft",
@@ -183,11 +226,15 @@ def resolve_ffmpeg_path(log=print):
                 return FFMPEG_PATH
         except (OSError, subprocess.TimeoutExpired):
             pass
-    log("⚠️ ffmpeg not found — browser capture will not mux audio/video without ffmpeg in PATH")
+    log(
+        "⚠️ ffmpeg not found — install system ffmpeg (sudo apt install ffmpeg), "
+        "pip install imageio-ffmpeg, or set FFMPEG_PATH"
+    )
     return None
 
 
-resolve_ffmpeg_path()
+# Resolve once at import without printing (avoids noisy startup when mux is not used yet).
+resolve_ffmpeg_path(log=lambda *_args, **_kwargs: None)
 
 # JavaScript hook to intercept decrypted video data from SourceBuffer.appendBuffer
 HOOK_JS = """
@@ -316,7 +363,10 @@ def _get_playwright_page(
             _cleanup_playwright()
 
     host = _sharepoint_cookie_host(sp_site_url)
-    guest_link_url = guest_link_url or load_guest_link()
+    guest_link_url = (guest_link_url or load_guest_link() or "").strip()
+    if guest_link_url and not _sp_sharing_url_has_stream_path(guest_link_url):
+        if guest_link_url.rstrip("/") == (sp_site_url or get_sp_site_url()).rstrip("/"):
+            guest_link_url = ""
 
     log("🌐 Launching browser...")
     from playwright.sync_api import sync_playwright
@@ -380,18 +430,27 @@ def _get_playwright_page(
     log("🔗 Warming session (guest link, then site)...")
     session_ok = False
 
-    for attempt in range(2):
-        try:
-            page.goto(guest_link_url, wait_until="networkidle", timeout=90000)
-            page.wait_for_timeout(4000)
-            title = page.title()
-            if title and "error" not in title.lower():
-                log(f"  ✅ Connected via guest link: {title[:80]}")
-                session_ok = True
-                break
-            log(f"  ⚠️ Guest link attempt {attempt + 1}/2: ({title})")
-        except Exception as e:
-            log(f"  ⚠️ Guest link attempt {attempt + 1}/2: {e}")
+    if guest_link_url.startswith("http"):
+        for attempt in range(2):
+            try:
+                page.goto(guest_link_url, wait_until="networkidle", timeout=90000)
+                page.wait_for_timeout(4000)
+                if _playwright_page_is_login_wall(page):
+                    log(
+                        f"  ⚠️ Guest link opened sign-in page (attempt {attempt + 1}/2). "
+                        "Refresh FedAuth/rtFa or paste a valid :f:/ sharing link."
+                    )
+                    continue
+                title = page.title()
+                if title and "error" not in title.lower():
+                    log(f"  ✅ Connected via guest link: {title[:80]}")
+                    session_ok = True
+                    break
+                log(f"  ⚠️ Guest link attempt {attempt + 1}/2: ({title})")
+            except Exception as e:
+                log(f"  ⚠️ Guest link attempt {attempt + 1}/2: {e}")
+    elif not session_ok:
+        log("  ℹ️ No :f:/ guest link configured — skipping guest warm-up")
 
     if not session_ok and fedauth_cookie:
         log("  🔄 Trying direct OneDrive connection...")
@@ -403,8 +462,11 @@ def _get_playwright_page(
                 timeout=90000,
             )
             page.wait_for_timeout(4000)
-            log(f"  ✅ Direct connection OK: {page.title()[:80]}")
-            session_ok = True
+            if _playwright_page_is_login_wall(page):
+                log("  ❌ Direct OneDrive connection still on sign-in page — update cookies")
+            else:
+                log(f"  ✅ Direct connection OK: {page.title()[:80]}")
+                session_ok = True
         except Exception as e:
             log(f"  ❌ Direct connection failed: {e}")
 
@@ -560,17 +622,22 @@ def download_video_via_capture(
         if num == 0:
             log(f"    ⚠️ No captured data for track: {track}")
             continue
-            
+
         total_bytes = 0
+        batch_size = 50
         with open(track_file, 'wb') as f_out:
-            for idx in range(num):
+            for start_idx in range(0, num, batch_size):
                 try:
-                    b64_data = page.evaluate(f"() => window.__capturedBuffers.{track}[{idx}].b64")
-                    raw = base64.b64decode(b64_data)
-                    f_out.write(raw)
-                    total_bytes += len(raw)
+                    batch = page.evaluate(
+                        "([t, s, e]) => window.__capturedBuffers[t].slice(s, e).map(x => x.b64)",
+                        [track, start_idx, min(start_idx + batch_size, num)],
+                    )
+                    for b64_data in batch:
+                        raw = base64.b64decode(b64_data)
+                        f_out.write(raw)
+                        total_bytes += len(raw)
                 except Exception as e:
-                    log(f"    ⚠️ Buffer extract error {idx}: {e}")
+                    log(f"    ⚠️ Buffer extract error near batch {start_idx}: {e}")
         log(f"    💾 {track}: {total_bytes/1024/1024:.1f} MB")
 
     # Reset captured buffers for next file
@@ -1478,30 +1545,93 @@ def _sharepoint_session_and_page(fedauth_cookie, rtfa_cookie, sp_site_url, log):
     return session, page
 
 
-def _download_one_file(session, page, sp_site_url, file_rel_url, local_path, log, allow_non_mp4=False):
+def _download_one_file(
+    session,
+    page,
+    sp_site_url,
+    file_rel_url,
+    local_path,
+    log,
+    allow_non_mp4=False,
+    *,
+    sharing_link_url: str | None = None,
+    item_id: str | None = None,
+    share_root_norm: str | None = None,
+    remote_size: int = 0,
+):
     """
     Download one SharePoint file. Returns 1 on success, 0 otherwise.
     If allow_non_mp4 is False, only .mp4 files are attempted (recursive folder sync).
-    If allow_non_mp4 is True, any file type is tried via REST when response is not HTML;
+    If allow_non_mp4 is True, any file type is tried via REST/shares when response is not HTML;
     Playwright capture is used only for video extensions.
     """
     name = os.path.basename(file_rel_url.rstrip("/"))
     base_site = (sp_site_url or get_sp_site_url()).rstrip("/")
+    ext = os.path.splitext(name)[1].lower()
+    is_video = ext == ".mp4" or ext in VIDEO_EXTENSIONS
 
     if os.path.exists(local_path):
         size = os.path.getsize(local_path)
-        if size > 1024 * 1024:
+        if remote_size and remote_size > 0:
+            if size == remote_size:
+                log(f"[-] Skip '{name}' (exists, {size/1024/1024:.1f} MB)")
+                return 0
+        elif not is_video or size > 1024 * 1024:
             log(f"[-] Skip '{name}' (exists, {size/1024/1024:.1f} MB)")
             return 0
         log(f"⚠️ Re-downloading '{name}' (suspicious size: {size/1024:.0f} KB)")
 
-    if not allow_non_mp4 and not name.lower().endswith(".mp4"):
+    if not allow_non_mp4 and not is_video:
         log(f"[-] Skip '{name}' (not video)")
         return 0
 
     log(f"[+] Downloading '{name}'...")
 
-    rel_url_enc = urllib.parse.quote(file_rel_url)
+    # Strategy 1: v2.0/shares API if sharing link is provided
+    from sp_sync.sharepoint.rest_folder_list import (
+        _should_try_v2_shares,
+        _v2_share_token_from_url,
+    )
+
+    if sharing_link_url and _should_try_v2_shares(sharing_link_url):
+        try:
+            p = urllib.parse.urlparse(base_site)
+            netloc = (p.netloc or "").lower()
+            if netloc and "sharepoint.com" in netloc:
+                root = f"{p.scheme}://{netloc}"
+                sid = _v2_share_token_from_url(sharing_link_url)
+                v2_content_url = None
+                if item_id:
+                    v2_content_url = f"{root}/_api/v2.0/shares/{sid}/driveItem/{urllib.parse.quote(str(item_id).strip(), safe='')}/content"
+                elif share_root_norm and file_rel_url.startswith(share_root_norm.rstrip("/") + "/"):
+                    rel_under = file_rel_url[len(share_root_norm.rstrip("/")) :].lstrip("/")
+                    if rel_under:
+                        enc_rel = "/".join(urllib.parse.quote(s, safe="") for s in rel_under.split("/") if s)
+                        v2_content_url = f"{root}/_api/v2.0/shares/{sid}/driveItem:/{enc_rel}:/content"
+
+                if v2_content_url:
+                    prev_accept = session.headers.get("Accept")
+                    session.headers["Accept"] = "*/*"
+                    try:
+                        v2_res = session.get(v2_content_url, stream=True, timeout=60, allow_redirects=True)
+                        if v2_res.status_code in (200, 206):
+                            ct = (v2_res.headers.get("Content-Type") or "").lower()
+                            if "html" not in ct:
+                                with open(local_path, "wb") as f_out:
+                                    for chunk in v2_res.iter_content(chunk_size=65536):
+                                        f_out.write(chunk)
+                                log(
+                                    f"✅ Downloaded '{name}' via shares API ({os.path.getsize(local_path)/1024/1024:.1f} MB)"
+                                )
+                                return 1
+                    finally:
+                        if prev_accept:
+                            session.headers["Accept"] = prev_accept
+        except Exception:
+            pass
+
+    # Strategy 2: Classic SharePoint REST API
+    rel_url_enc = urllib.parse.quote(file_rel_url, safe="/")
     file_content_url = f"{base_site}/_api/web/GetFileByServerRelativeUrl('{rel_url_enc}')/$value"
 
     try:
@@ -1525,8 +1655,8 @@ def _download_one_file(session, page, sp_site_url, file_rel_url, local_path, log
     except Exception:
         pass
 
-    ext = os.path.splitext(name)[1].lower()
-    use_capture = ext == ".mp4" or ext in VIDEO_EXTENSIONS
+    # Strategy 3: Playwright browser video capture (for protected streams)
+    use_capture = is_video
     if not use_capture:
         log(f"    ❌ API download failed; skipping capture (not video): '{name}'")
         return 0
@@ -1561,6 +1691,8 @@ def sync_sharepoint_files(
     log_callback=None,
     *,
     local_flat=False,
+    sharing_link: str | None = None,
+    allow_non_mp4: bool = True,
 ):
     """Recursively sync a SharePoint folder using API listing + Playwright capture for downloads.
 
@@ -1592,11 +1724,27 @@ def sync_sharepoint_files(
         fedauth_cookie, rtfa_cookie, sp_site_url, log
     )
 
+    cfg_share = (sharing_link or "").strip()
     guest = load_guest_link()
-    share_u = guest.strip() if _sp_sharing_url_has_stream_path(guest) else ""
+    share_u = ""
+    if _sp_sharing_url_has_stream_path(cfg_share):
+        share_u = cfg_share
+    elif _sp_sharing_url_has_stream_path(guest):
+        share_u = guest.strip()
+    share_root = ""
+    if share_u:
+        root_path, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
+        if root_path:
+            share_root = root_path
     base = (sp_site_url or get_sp_site_url()).rstrip("/")
-    for warm in (share_u, guest.strip(), base + "/"):
-        if warm and str(warm).startswith("http"):
+    warm_urls = []
+    if share_u:
+        warm_urls.append(share_u)
+    if guest.strip() and guest.strip() not in warm_urls:
+        warm_urls.append(guest.strip())
+    warm_urls.append(base + "/")
+    for warm in warm_urls:
+        if warm.startswith("http"):
             prime_sharepoint_session_for_browse(
                 session,
                 base,
@@ -1604,6 +1752,12 @@ def sync_sharepoint_files(
                 fedauth_cookie=fedauth_cookie,
                 rtfa_cookie=rtfa_cookie,
             )
+
+    if not share_u:
+        log(
+            "⚠️ No :f:/ sharing link for this sync. REST listing may return 403. "
+            "Add a sharing link in Connection settings or re-add the folder from explorer."
+        )
 
     target_dir = _mirror_local_root(
         download_dir, folder_rel_url, bool(local_flat), log
@@ -1616,7 +1770,8 @@ def sync_sharepoint_files(
         target_dir,
         log,
         sharing_link_url=share_u or None,
-        use_sharing_link=True,
+        share_root_norm=share_root or None,
+        allow_non_mp4=allow_non_mp4,
     )
 
 
@@ -1627,6 +1782,8 @@ def sync_sharepoint_single_file(
     file_rel_url=None,
     local_path=None,
     log_callback=None,
+    *,
+    sharing_link: str | None = None,
 ):
     """Download a single SharePoint file (any type via REST; capture fallback for video). Returns 0 or 1."""
     def log(msg):
@@ -1662,6 +1819,7 @@ def sync_sharepoint_single_file(
         local_path,
         log,
         allow_non_mp4=True,
+        sharing_link_url=sharing_link or None,
     )
 
 
@@ -1674,7 +1832,8 @@ def _sync_folder_recursive(
     log,
     *,
     sharing_link_url: str | None = None,
-    use_sharing_link: bool = False,
+    share_root_norm: str | None = None,
+    allow_non_mp4: bool = True,
 ):
     """Internal recursive folder sync (same listing stack as /sp/browse)."""
     from sp_sync.sharepoint.rest_folder_list import list_folder_children_rest
@@ -1682,13 +1841,16 @@ def _sync_folder_recursive(
     os.makedirs(download_dir, exist_ok=True)
 
     base_site = (sp_site_url or get_sp_site_url()).rstrip("/")
-    share_for_list = (sharing_link_url or "").strip() if use_sharing_link else ""
+    share_for_list = (sharing_link_url or "").strip()
+    if share_for_list and not _sp_sharing_url_has_stream_path(share_for_list):
+        share_for_list = ""
     listing = list_folder_children_rest(
         session,
         base_site,
         folder_rel_url,
         timeout=120,
         sharing_link_url=share_for_list or None,
+        share_root_norm=share_root_norm,
     )
     if not listing.get("ok"):
         err = listing.get("error") or "Folder listing failed"
@@ -1700,11 +1862,22 @@ def _sync_folder_recursive(
         if snippet:
             log(f"   Server: {snippet[:240]}")
         if st in (401, 403) or "403" in err or "401" in err:
-            log(
-                "   Paste fresh FedAuth/rtFa from the browser that opens this folder, "
-                "or save a :f:/ guest link for sync warm-up."
-            )
+            if not share_for_list:
+                log(
+                    "   No :f:/ sharing link on this folder. Resolve the link in SharePoint explorer, "
+                    "save the guest link under Connection settings, or re-add the folder to sync."
+                )
+            else:
+                log(
+                    "   Paste fresh FedAuth/rtFa from the browser that opens this folder, "
+                    "or use a valid :f:/ sharing link."
+                )
         return 0
+
+    method = listing.get("method") or "rest"
+    n_f = len(listing.get("folders") or [])
+    n_files = len(listing.get("files") or [])
+    log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s)")
 
     downloaded_count = 0
     for file_row in listing.get("files") or []:
@@ -1712,6 +1885,8 @@ def _sync_folder_recursive(
         rel_url = file_row.get("rel_url") or ""
         if not name or not rel_url:
             continue
+        file_item_id = file_row.get("item_id")
+        sz = file_row.get("size") or 0
         local_path = os.path.join(download_dir, name)
         downloaded_count += _download_one_file(
             session,
@@ -1720,7 +1895,11 @@ def _sync_folder_recursive(
             rel_url,
             local_path,
             log,
-            allow_non_mp4=False,
+            allow_non_mp4=allow_non_mp4,
+            sharing_link_url=share_for_list or None,
+            item_id=file_item_id,
+            share_root_norm=share_root_norm,
+            remote_size=sz,
         )
 
     for folder_row in listing.get("folders") or []:
@@ -1740,7 +1919,8 @@ def _sync_folder_recursive(
             sub_dir,
             log,
             sharing_link_url=sharing_link_url,
-            use_sharing_link=False,
+            share_root_norm=share_root_norm,
+            allow_non_mp4=allow_non_mp4,
         )
 
     return downloaded_count
@@ -1756,8 +1936,11 @@ def start_sync_from_config(fedauth_cookie, rtfa_cookie, sp_site_url, config, log
 
     log("==================================================")
     log("⏳ Connecting and scanning files and folders...")
+    count = 0
     try:
         et = str(config.get("entry_type") or "folder").strip().lower()
+        share_cfg = (config.get("sharing_link") or "").strip()
+        allow_all = config.get("allow_non_mp4", True) if not config.get("video_only", False) else False
         if et == "file":
             count = sync_sharepoint_single_file(
                 fedauth_cookie,
@@ -1766,6 +1949,7 @@ def start_sync_from_config(fedauth_cookie, rtfa_cookie, sp_site_url, config, log
                 config["rel_url"],
                 config["local_path"],
                 log_callback,
+                sharing_link=share_cfg or None,
             )
         else:
             count = sync_sharepoint_files(
@@ -1776,7 +1960,19 @@ def start_sync_from_config(fedauth_cookie, rtfa_cookie, sp_site_url, config, log
                 config["local_path"],
                 log_callback,
                 local_flat=bool(config.get("local_flat", False)),
+                sharing_link=share_cfg or None,
+                allow_non_mp4=allow_all,
             )
+    except json.JSONDecodeError as exc:
+        log(f"❌ Server returned non-JSON while listing folder: {exc}")
+        log(
+            "   Refresh FedAuth/rtFa, or add the original :f:/ sharing link to this folder "
+            "(edit config / re-add from explorer)."
+        )
+        count = 0
+    except Exception as exc:
+        log(f"❌ Error: {exc}")
+        count = 0
     finally:
         _cleanup_playwright()
     log("==================================================")

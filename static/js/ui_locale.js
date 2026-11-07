@@ -17,6 +17,13 @@
       tabGdTitle: "Google Drive",
       tabSettingsTitle: "Connection settings",
       tabLogsTitle: "Activity log",
+      spSyncOrderHint: "Drag rows to set sync order (top = first). Paused items stay in the list but are skipped during sync.",
+      spOrderSaved: "Sync order saved",
+      spSyncEnabled: "Sync enabled for this folder",
+      spSyncPaused: "Sync paused for this folder",
+      logClearConfirm: "Clear log entries for the current filter?",
+      logCleared: "Log cleared",
+      btnClearLog: "Clear log",
     },
     ar: {
       brand: "أداة المزامنة الموحدة",
@@ -31,6 +38,13 @@
       tabGdTitle: "Google Drive",
       tabSettingsTitle: "إعدادات الاتصال",
       tabLogsTitle: "سجل العمليات",
+      spSyncOrderHint: "اسحب الصفوف لترتيب المزامنة (الأعلى يُنفَّذ أولاً). العناصر المتوقفة تبقى في القائمة ولا تُحمَّل أثناء المزامنة.",
+      spOrderSaved: "تم حفظ ترتيب المزامنة",
+      spSyncEnabled: "تم تفعيل المزامنة لهذا المجلد",
+      spSyncPaused: "تم إيقاف المزامنة لهذا المجلد",
+      logClearConfirm: "مسح سجلات العرض الحالي؟",
+      logCleared: "تم مسح السجل",
+      btnClearLog: "مسح السجل",
     },
   };
 

@@ -44,11 +44,21 @@ class CookieValidator:
         return result
 
     def test_cookie_connectivity(self, fedauth, rtfa, test_url=None):
-        if test_url is None:
-            test_url = (
-                "https://comfac001-my.sharepoint.com/personal/"
-                "waleedelsaeed_comfac001_onmicrosoft_com/_layouts/15/MySite.aspx"
-            )
+        if not test_url:
+            try:
+                from sp_sync.db.store import get_store
+
+                site = (get_store().get_sharepoint_site_url() or "").strip()
+                if site:
+                    test_url = f"{site.rstrip('/')}/_layouts/15/MySite.aspx"
+            except Exception:
+                pass
+
+        if not test_url:
+            return {
+                "success": False,
+                "message": "SharePoint site URL is not set. Configure site URL first or provide a test URL.",
+            }
 
         try:
             import requests

@@ -167,16 +167,22 @@
         document.getElementById('spx-lang-en').addEventListener('click', () => { spxLang = 'en'; spxApplyLang(); });
         document.getElementById('spx-lang-ar').addEventListener('click', () => { spxLang = 'ar'; spxApplyLang(); });
         const spxBackDash = document.getElementById('spx-back-dashboard');
-        if (spxBackDash && typeof switchTab === 'function') {
+        if (spxBackDash) {
             spxBackDash.addEventListener('click', () => {
-                const nav = document.getElementById('nav-sp');
-                if (nav) switchTab('sp-tab', nav);
+                if (typeof switchTab === 'function') {
+                    const nav = document.getElementById('nav-sp');
+                    if (nav) switchTab('sp-tab', nav);
+                } else {
+                    window.location.href = '/';
+                }
             });
         }
 
         let exploreHistory = [];
         let sessionPrimeUrl = '';
         let sessionSharingUrl = '';
+        let sessionShareBrowseRoot = '';
+        let sessionParentItemId = '';
 
         function showToast(msg, isErr) {
             const t = document.getElementById('spx-toast');
@@ -290,6 +296,8 @@
                 sessionPrimeUrl = (data.final_url || '').trim();
                 sessionSharingUrl = (data.sharing_url || '').trim();
                 if (!sessionSharingUrl && /:[fwx]:\//i.test(raw)) sessionSharingUrl = raw;
+                sessionShareBrowseRoot = (data.sharing_root || data.browse_parent || '').trim();
+                sessionParentItemId = '';
                 meta.textContent = spxT('resolveDone') + ' ' + (data.resolved_from || '') + (data.final_url ? ' ← ' + data.final_url : '');
                 showToast(spxT('linkResolvedLoading'), false);
                 exploreRun();
@@ -309,6 +317,8 @@
                 ? exploreHistory.map((h) => h.name || h.rel_url).join(' / ') + ' / '
                 : '';
             const browsePayload = { parent_rel_url: parent };
+            if (sessionParentItemId) browsePayload.parent_item_id = sessionParentItemId;
+            if (sessionShareBrowseRoot) browsePayload.share_browse_root = sessionShareBrowseRoot;
             let prime = (sessionPrimeUrl || '').trim();
             if (!prime) {
                 const paste = document.getElementById('spx-paste').value.trim();
@@ -449,7 +459,12 @@
                 btn.title = spxT('openFolderTitle');
                 btn.addEventListener('click', () => {
                     const cur = document.getElementById('spx-parent').value.trim();
-                    exploreHistory.push({ rel_url: cur, name: fo.name || fo.rel_url });
+                    exploreHistory.push({
+                        rel_url: cur,
+                        name: fo.name || fo.rel_url,
+                        item_id: fo.item_id || '',
+                    });
+                    sessionParentItemId = fo.item_id || '';
                     document.getElementById('spx-parent').value = fo.rel_url;
                     exploreRun();
                 });
@@ -507,6 +522,7 @@
         document.getElementById('spx-back').addEventListener('click', () => {
             if (!exploreHistory.length) return;
             const prev = exploreHistory.pop();
+            sessionParentItemId = prev.item_id || '';
             document.getElementById('spx-parent').value = prev.rel_url;
             exploreRun();
         });
@@ -534,6 +550,13 @@
             if (!items.length) {
                 showToast(spxT('selectOneRow'), true);
                 return;
+            }
+            const shareLink = (sessionSharingUrl || '').trim();
+            if (shareLink) {
+                items.forEach((it) => {
+                    it.sharing_link = shareLink;
+                    if (sessionShareBrowseRoot) it.sharing_root = sessionShareBrowseRoot;
+                });
             }
             fetch('/sp/bulk_add', {
                 method: 'POST',

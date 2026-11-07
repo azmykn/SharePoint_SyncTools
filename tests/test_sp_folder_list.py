@@ -22,6 +22,9 @@ from sp_sync.sharepoint.rest_folder_list import (
     normalize_server_relative_folder_path,
     _odata_atp_query_value,
     _parse_collection_page,
+    _v2_shares_children_api_url,
+    _v2_shares_list_children,
+    _v2_share_token_from_url,
 )
 
 
@@ -115,7 +118,6 @@ class TestListFolderODataAtpFallback(unittest.TestCase):
             [
                 _resp(200, expand_payload),
                 _resp(403, text="classic denied"),
-                _resp(403, text="classic denied"),
                 _resp(200, ok_folder),
                 _resp(200, ok_files),
             ]
@@ -124,8 +126,8 @@ class TestListFolderODataAtpFallback(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["method"], "split_odata_atp")
         self.assertEqual(len(out["folders"]), 1)
-        self.assertIn("GetFolderByServerRelativeUrl(@p)", sess.calls[3])
-        self.assertIn("@p=", sess.calls[3])
+        self.assertIn("GetFolderByServerRelativeUrl(@p)", sess.calls[2])
+        self.assertIn("@p=", sess.calls[2])
 
 
 class TestListFolderV2SharesFallback(unittest.TestCase):
@@ -384,6 +386,76 @@ class TestListFolderWebrelRetry(unittest.TestCase):
         self.assertEqual(out["method"], "split_webrel")
         self.assertEqual(len(out["folders"]), 1)
         self.assertEqual(out["folders"][0]["name"], "Inner")
+
+
+class TestV2SharesChildrenUrl(unittest.TestCase):
+    def test_share_root_children(self):
+        url = _v2_shares_children_api_url(
+            "https://tenant-my.sharepoint.com",
+            "u!abc",
+            "/personal/u/Documents/Root",
+            share_root_norm="/personal/u/Documents/Root",
+        )
+        self.assertIn("/driveItem/children", url)
+        self.assertNotIn(":/", url.split("driveItem")[-1])
+
+    def test_subfolder_by_relative_path(self):
+        root = "/personal/u/Documents/Parent"
+        sub = root + "/Sub"
+        url = _v2_shares_children_api_url(
+            "https://tenant-my.sharepoint.com",
+            "u!abc",
+            sub,
+            share_root_norm=root,
+        )
+        self.assertIn("driveItem:/Sub:/children", url)
+
+    def test_subfolder_by_item_id(self):
+        url = _v2_shares_children_api_url(
+            "https://tenant-my.sharepoint.com",
+            "u!abc",
+            "/any",
+            parent_item_id="01ITEMID",
+        )
+        self.assertIn("/driveItem/01ITEMID/children", url)
+
+
+class TestV2SharesPagination(unittest.TestCase):
+    class _Sess:
+        def __init__(self, pages):
+            self._pages = pages
+            self.headers = {}
+            self.calls = []
+
+        def get(self, url, headers=None, timeout=None, **kwargs):
+            self.calls.append(url)
+            return self._pages.pop(0)
+
+    def test_v2_shares_follows_next_link(self):
+        page1 = {
+            "value": [
+                {"name": "Folder1", "folder": {}, "id": "id1"},
+                {"name": "file1.txt", "size": 100, "id": "id2"},
+            ],
+            "@odata.nextLink": "https://tenant-my.sharepoint.com/_api/v2.0/shares/u!abc/driveItem/children?$skiptoken=foo",
+        }
+        page2 = {
+            "value": [
+                {"name": "file2.pdf", "size": 200, "id": "id3"},
+            ]
+        }
+        sess = self._Sess([_resp(200, page1), _resp(200, page2)])
+        out = _v2_shares_list_children(
+            sess,
+            "https://tenant-my.sharepoint.com",
+            "https://tenant-my.sharepoint.com/:f:/g/personal/token",
+            "/personal/u/Documents/Root",
+            timeout=5,
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(out["folders"]), 1)
+        self.assertEqual(len(out["files"]), 2)
+        self.assertEqual(len(sess.calls), 2)
 
 
 if __name__ == "__main__":

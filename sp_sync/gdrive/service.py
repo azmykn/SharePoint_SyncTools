@@ -232,12 +232,11 @@ def sync_gdrive_folder(creds, folder_id, local_dir, log_callback=None, depth=0):
         
         try:
             request = service.files().get_media(fileId=file_id)
-            fh = io.FileIO(local_path, 'wb')
-            downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
-            done = False
-            while not done:
-                status, done = downloader.next_chunk()
-            fh.close()
+            with io.FileIO(local_path, 'wb') as fh:
+                downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
             log(f"{indent}✅ Download finished for '{name}'")
             downloaded_count += 1
         except Exception as e:

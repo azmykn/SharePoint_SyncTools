@@ -123,6 +123,14 @@ class AppStore:
         out.reverse()
         return out
 
+    def clear_logs(self, source: str | None = None) -> None:
+        """Remove log rows; source=None or 'all' clears everything."""
+        with _lock, self._connect() as conn:
+            if source and source != "all":
+                conn.execute("DELETE FROM log_entries WHERE source = ?", (source,))
+            else:
+                conn.execute("DELETE FROM log_entries")
+
     # --- Typed helpers ---
 
     def get_sharepoint_configs(self) -> list:
