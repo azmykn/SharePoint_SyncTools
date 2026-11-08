@@ -18,6 +18,7 @@ KEY_GUEST_LINK = "sharepoint_guest_link"
 KEY_SP_SITE_URL = "sharepoint_site_root_url"
 KEY_SYNC_REPORT_SP = "sync_report_sharepoint"
 KEY_SYNC_REPORT_GD = "sync_report_gdrive"
+KEY_SYNC_REPORT_HISTORY = "sync_report_history"
 
 _lock = threading.RLock()
 _store_singleton: Optional["AppStore"] = None
@@ -185,6 +186,47 @@ class AppStore:
         svc = (service or "").strip().lower()
         key = KEY_SYNC_REPORT_SP if svc == "sharepoint" else KEY_SYNC_REPORT_GD
         self.set_json(key, report if isinstance(report, dict) else {})
+
+    def append_sync_report_history(self, report: dict, max_items: int = 100) -> None:
+        """Append one sync report event to history (newest first, capped)."""
+        if not isinstance(report, dict) or not report:
+            return
+        cur = self.get_json(KEY_SYNC_REPORT_HISTORY, None)
+        items = cur if isinstance(cur, list) else []
+        items.insert(0, report)
+        cap = max(1, int(max_items))
+        self.set_json(KEY_SYNC_REPORT_HISTORY, items[:cap])
+
+    def get_sync_report_history(self, service: str = "all", limit: int = 20) -> list[dict]:
+        """Get sync report history, optionally filtered by service."""
+        svc = (service or "all").strip().lower()
+        lim = max(1, int(limit))
+        cur = self.get_json(KEY_SYNC_REPORT_HISTORY, None)
+        items = cur if isinstance(cur, list) else []
+        out: list[dict] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if svc in ("sharepoint", "gdrive") and (it.get("service") or "").strip().lower() != svc:
+                continue
+            out.append(it)
+            if len(out) >= lim:
+                break
+        return out
+
+    def clear_sync_report_history(self, service: str = "all") -> None:
+        """Clear all report history or only one service."""
+        svc = (service or "all").strip().lower()
+        if svc == "all":
+            self.set_json(KEY_SYNC_REPORT_HISTORY, [])
+            return
+        cur = self.get_json(KEY_SYNC_REPORT_HISTORY, None)
+        items = cur if isinstance(cur, list) else []
+        kept = [
+            it for it in items
+            if isinstance(it, dict) and (it.get("service") or "").strip().lower() != svc
+        ]
+        self.set_json(KEY_SYNC_REPORT_HISTORY, kept)
 
 
 def get_store() -> AppStore:

@@ -200,16 +200,22 @@ class TestEnhancementRoutes(unittest.TestCase):
         from sp_sync.db.store import get_store
 
         store = get_store()
-        store.set_sync_report("sharepoint", {
+        sp_report = {
             "service": "sharepoint",
             "status": "success",
             "downloaded_files": 7,
-        })
-        store.set_sync_report("gdrive", {
+            "finished_at": "2026-01-01 11:00:00",
+        }
+        gd_report = {
             "service": "gdrive",
             "status": "partial",
             "downloaded_files": 3,
-        })
+            "finished_at": "2026-01-01 12:00:00",
+        }
+        store.set_sync_report("sharepoint", sp_report)
+        store.set_sync_report("gdrive", gd_report)
+        store.append_sync_report_history(sp_report)
+        store.append_sync_report_history(gd_report)
 
         res_all = self.client.get("/sync/report")
         self.assertEqual(res_all.status_code, 200)
@@ -231,6 +237,29 @@ class TestEnhancementRoutes(unittest.TestCase):
         self.assertFalse(bad_data["success"])
         self.assertEqual(bad_data.get("code"), "INVALID_SERVICE")
 
+        # History endpoint (all)
+        res_hist_all = self.client.get("/sync/report/history?service=all&limit=10")
+        self.assertEqual(res_hist_all.status_code, 200)
+        hist_all = res_hist_all.get_json()
+        self.assertTrue(hist_all["success"])
+        self.assertEqual(hist_all["service"], "all")
+        self.assertGreaterEqual(len(hist_all["items"]), 2)
+
+        # History endpoint (filtered)
+        res_hist_sp = self.client.get("/sync/report/history?service=sharepoint&limit=5")
+        self.assertEqual(res_hist_sp.status_code, 200)
+        hist_sp = res_hist_sp.get_json()
+        self.assertTrue(hist_sp["success"])
+        self.assertEqual(hist_sp["service"], "sharepoint")
+        self.assertTrue(all((it.get("service") == "sharepoint") for it in hist_sp["items"]))
+
+        # Invalid history limit
+        res_hist_bad_limit = self.client.get("/sync/report/history?service=all&limit=999")
+        self.assertEqual(res_hist_bad_limit.status_code, 400)
+        bad_limit_data = res_hist_bad_limit.get_json()
+        self.assertFalse(bad_limit_data["success"])
+        self.assertEqual(bad_limit_data.get("code"), "INVALID_LIMIT")
+
         # Clear one service report only
         res_clear_sp = self.client.post("/sync/report/clear", json={"service": "sharepoint"})
         self.assertEqual(res_clear_sp.status_code, 200)
@@ -241,6 +270,15 @@ class TestEnhancementRoutes(unittest.TestCase):
         self.assertEqual(after_sp_data["reports"]["sharepoint"], {})
         self.assertEqual(after_sp_data["reports"]["gdrive"].get("downloaded_files"), 3)
 
+        # sharepoint history cleared, gdrive remains
+        res_hist_sp_after = self.client.get("/sync/report/history?service=sharepoint&limit=10")
+        self.assertEqual(res_hist_sp_after.status_code, 200)
+        self.assertEqual(res_hist_sp_after.get_json()["items"], [])
+
+        res_hist_gd_after = self.client.get("/sync/report/history?service=gdrive&limit=10")
+        self.assertEqual(res_hist_gd_after.status_code, 200)
+        self.assertGreaterEqual(len(res_hist_gd_after.get_json()["items"]), 1)
+
         # Clear all
         res_clear_all = self.client.post("/sync/report/clear", json={"service": "all"})
         self.assertEqual(res_clear_all.status_code, 200)
@@ -250,6 +288,10 @@ class TestEnhancementRoutes(unittest.TestCase):
         after_data = res_all_after.get_json()
         self.assertEqual(after_data["reports"]["sharepoint"], {})
         self.assertEqual(after_data["reports"]["gdrive"], {})
+
+        res_hist_after_all = self.client.get("/sync/report/history?service=all&limit=10")
+        self.assertEqual(res_hist_after_all.status_code, 200)
+        self.assertEqual(res_hist_after_all.get_json()["items"], [])
 
         # Invalid clear service
         res_clear_bad = self.client.post("/sync/report/clear", json={"service": "dropbox"})

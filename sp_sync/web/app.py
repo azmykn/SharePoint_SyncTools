@@ -120,10 +120,12 @@ def _request_json() -> dict:
 
 
 def _save_sync_report(service: str, report: dict) -> None:
-    """Persist last sync report for service; best-effort only."""
+    """Persist last sync report + append history entry; best-effort only."""
     try:
         from sp_sync.db.store import get_store
-        get_store().set_sync_report(service, report)
+        store = get_store()
+        store.set_sync_report(service, report)
+        store.append_sync_report_history(report)
     except Exception as exc:
         add_log('system', f"⚠️ Failed to save sync report ({service}): {exc}")
 
@@ -1418,9 +1420,31 @@ def sync_report_clear():
         store.set_sync_report('sharepoint', {})
     if service in ('all', 'gdrive'):
         store.set_sync_report('gdrive', {})
+    store.clear_sync_report_history(service)
 
     add_log('system', f"🧹 Sync report cleared ({service})")
     return jsonify({'success': True, 'service': service})
+
+
+@app.route('/sync/report/history')
+def sync_report_history():
+    """Get sync report history, optionally filtered by service."""
+    from sp_sync.db.store import get_store
+
+    service = (request.args.get('service') or 'all').strip().lower()
+    if service not in ('all', 'sharepoint', 'gdrive'):
+        return _json_error('service must be one of: all, sharepoint, gdrive', 400, code='INVALID_SERVICE')
+
+    raw_limit = (request.args.get('limit') or '20').strip()
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return _json_error('limit must be an integer', 400, code='INVALID_LIMIT')
+    if limit < 1 or limit > 200:
+        return _json_error('limit must be between 1 and 200', 400, code='INVALID_LIMIT')
+
+    items = get_store().get_sync_report_history(service=service, limit=limit)
+    return jsonify({'success': True, 'service': service, 'limit': limit, 'items': items})
 
 
 @app.route('/api/browse_folder')

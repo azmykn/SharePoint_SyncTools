@@ -371,6 +371,30 @@
             color: var(--text-muted);
         }
 
+        .status-chip {
+            display:inline-flex;
+            align-items:center;
+            gap:6px;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 0.78rem;
+            border: 1px solid rgba(148,163,184,0.35);
+            color: var(--text-muted);
+            background: rgba(15,23,42,0.45);
+        }
+        .status-chip.ok {
+            color: #34d399;
+            border-color: rgba(52,211,153,0.5);
+        }
+        .status-chip.warn {
+            color: #f59e0b;
+            border-color: rgba(245,158,11,0.5);
+        }
+        .status-chip.err {
+            color: #f87171;
+            border-color: rgba(248,113,113,0.5);
+        }
+
     </style>
     <script defer src="{{ url_for('static', filename='js/ui_locale.js') }}"></script>
 </head>
@@ -441,6 +465,8 @@
                     </div>
                 </div>
                 <div id="sync-report-content" style="margin-top:10px; color:var(--text-muted); font-size:0.9rem; line-height:1.6;">No report yet.</div>
+                <div style="margin-top:10px; font-size:0.85rem; color:var(--text-muted);">Recent runs (latest first)</div>
+                <div id="sync-report-history" style="margin-top:8px; color:var(--text-muted); font-size:0.85rem; line-height:1.6;">No history yet.</div>
             </div>
             {% if not sp_site_configured %}
             <div class="card" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:16px;">
@@ -725,7 +751,11 @@
                                 <span id="scheduler-last-run">No scheduled runs recorded yet.</span>
                             {% endif %}
                         </div>
-                        <div id="scheduler-health" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Daemon: checking... • Due now: --</div>
+                        <div id="scheduler-health" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                            <span class="status-chip" id="scheduler-daemon-chip">Daemon: checking...</span>
+                            <span class="status-chip" id="scheduler-due-chip">Due now: --</span>
+                            <span id="scheduler-next-run" style="color: var(--text-muted);">Next run: --</span>
+                        </div>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
                             <button type="submit" class="btn">Save scheduler settings</button>
                             <button type="button" class="btn btn-outline" onclick="schedulerRunNow()">Run now</button>
@@ -1442,7 +1472,9 @@
 
         // --- Scheduler Settings ---
         function updateSchedulerHealthUi(payload) {
-            const healthEl = document.getElementById('scheduler-health');
+            const daemonChip = document.getElementById('scheduler-daemon-chip');
+            const dueChip = document.getElementById('scheduler-due-chip');
+            const nextEl = document.getElementById('scheduler-next-run');
             const lastEl = document.getElementById('scheduler-last-run');
             if (!payload || !payload.settings) return;
             const st = payload.settings;
@@ -1453,10 +1485,17 @@
                     lastEl.textContent = 'No scheduled runs recorded yet.';
                 }
             }
-            if (healthEl) {
-                const daemonText = payload.daemon_alive ? 'Alive ✅' : 'Stopped ❌';
-                const dueText = payload.is_due ? 'Yes' : 'No';
-                healthEl.textContent = `Daemon: ${daemonText} • Due now: ${dueText}`;
+
+            if (daemonChip) {
+                daemonChip.className = `status-chip ${payload.daemon_alive ? 'ok' : 'err'}`;
+                daemonChip.textContent = `Daemon: ${payload.daemon_alive ? 'Alive' : 'Stopped'}`;
+            }
+            if (dueChip) {
+                dueChip.className = `status-chip ${payload.is_due ? 'warn' : 'ok'}`;
+                dueChip.textContent = `Due now: ${payload.is_due ? 'Yes' : 'No'}`;
+            }
+            if (nextEl) {
+                nextEl.textContent = `Next run: ${st.next_run || '--'}`;
             }
         }
 
@@ -1668,14 +1707,30 @@
             `;
         }
 
+        function buildHistoryRows(items) {
+            if (!Array.isArray(items) || !items.length) return 'No history yet.';
+            return items.slice(0, 6).map((it) => {
+                const svc = (it.service || 'unknown').toString();
+                const status = (it.status || 'unknown').toString();
+                const when = (it.finished_at || it.started_at || '-').toString();
+                const dl = Number(it.downloaded_files || 0);
+                const trig = (it.trigger || '-').toString();
+                return `<div style="padding:6px 0; border-bottom:1px dashed rgba(148,163,184,0.2);">${when} • <strong style="color:var(--text-main)">${svc}</strong> • ${status} • downloaded ${dl} • trigger=${trig}</div>`;
+            }).join('');
+        }
+
         async function refreshSyncReport() {
             try {
-                const res = await fetch('/sync/report');
+                const [res, histRes] = await Promise.all([
+                    fetch('/sync/report'),
+                    fetch('/sync/report/history?service=all&limit=6'),
+                ]);
                 if (!res.ok) return;
                 const data = await res.json();
                 if (!data.success) return;
                 const card = document.getElementById('sync-report-card');
                 const content = document.getElementById('sync-report-content');
+                const histEl = document.getElementById('sync-report-history');
                 if (!card || !content) return;
 
                 const sp = data.reports && data.reports.sharepoint ? data.reports.sharepoint : {};
@@ -1686,14 +1741,22 @@
                 if (!hasSp && !hasGd) {
                     card.style.display = 'block';
                     content.innerHTML = 'No report yet. Start sync from any service to generate a summary.';
-                    return;
+                } else {
+                    card.style.display = 'block';
+                    let html = '';
+                    if (hasSp) html += buildReportRow('SharePoint', sp);
+                    if (hasGd) html += buildReportRow('Google Drive', gd);
+                    content.innerHTML = html;
                 }
 
-                card.style.display = 'block';
-                let html = '';
-                if (hasSp) html += buildReportRow('SharePoint', sp);
-                if (hasGd) html += buildReportRow('Google Drive', gd);
-                content.innerHTML = html;
+                if (histEl) {
+                    if (histRes.ok) {
+                        const histData = await histRes.json();
+                        histEl.innerHTML = buildHistoryRows(histData.items || []);
+                    } else {
+                        histEl.textContent = 'History unavailable.';
+                    }
+                }
             } catch (_) {}
         }
 
