@@ -459,7 +459,18 @@
             <div id="sync-report-card" class="card" style="margin-bottom:16px; border-color: rgba(52,211,153,0.35);">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
                     <div class="card-header" style="margin:0;">📊 Last sync summary</div>
-                    <div style="display:flex; gap:8px;">
+                    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                        <select id="sync-report-service-filter" class="form-input" style="height:32px; width:auto; min-width:130px;" onchange="refreshSyncReport()">
+                            <option value="all">All services</option>
+                            <option value="sharepoint">SharePoint</option>
+                            <option value="gdrive">Google Drive</option>
+                        </select>
+                        <select id="sync-report-limit-filter" class="form-input" style="height:32px; width:auto; min-width:120px;" onchange="refreshSyncReport()">
+                            <option value="6">History: 6</option>
+                            <option value="10">History: 10</option>
+                            <option value="20">History: 20</option>
+                            <option value="50">History: 50</option>
+                        </select>
                         <button type="button" class="btn btn-outline btn-small" onclick="refreshSyncReport()">Refresh</button>
                         <button type="button" class="btn btn-outline btn-small" onclick="clearSyncReport()">Clear</button>
                     </div>
@@ -1709,7 +1720,7 @@
 
         function buildHistoryRows(items) {
             if (!Array.isArray(items) || !items.length) return 'No history yet.';
-            return items.slice(0, 6).map((it) => {
+            return items.map((it) => {
                 const svc = (it.service || 'unknown').toString();
                 const status = (it.status || 'unknown').toString();
                 const when = (it.finished_at || it.started_at || '-').toString();
@@ -1719,11 +1730,25 @@
             }).join('');
         }
 
+        function getSyncReportFilters() {
+            const service = document.getElementById('sync-report-service-filter')?.value || 'all';
+            const rawLimit = document.getElementById('sync-report-limit-filter')?.value || '6';
+            const limit = Number.parseInt(rawLimit, 10);
+            return {
+                service,
+                limit: Number.isFinite(limit) && limit > 0 ? limit : 6,
+            };
+        }
+
         async function refreshSyncReport() {
             try {
+                const { service, limit } = getSyncReportFilters();
+                const reportUrl = service === 'all' ? '/sync/report' : `/sync/report?service=${encodeURIComponent(service)}`;
+                const historyUrl = `/sync/report/history?service=${encodeURIComponent(service)}&limit=${encodeURIComponent(String(limit))}`;
+
                 const [res, histRes] = await Promise.all([
-                    fetch('/sync/report'),
-                    fetch('/sync/report/history?service=all&limit=6'),
+                    fetch(reportUrl),
+                    fetch(historyUrl),
                 ]);
                 if (!res.ok) return;
                 const data = await res.json();
@@ -1733,21 +1758,24 @@
                 const histEl = document.getElementById('sync-report-history');
                 if (!card || !content) return;
 
-                const sp = data.reports && data.reports.sharepoint ? data.reports.sharepoint : {};
-                const gd = data.reports && data.reports.gdrive ? data.reports.gdrive : {};
-                const hasSp = Object.keys(sp).length > 0;
-                const hasGd = Object.keys(gd).length > 0;
-
-                if (!hasSp && !hasGd) {
-                    card.style.display = 'block';
-                    content.innerHTML = 'No report yet. Start sync from any service to generate a summary.';
-                } else {
-                    card.style.display = 'block';
-                    let html = '';
+                let html = '';
+                if (service === 'all') {
+                    const sp = data.reports && data.reports.sharepoint ? data.reports.sharepoint : {};
+                    const gd = data.reports && data.reports.gdrive ? data.reports.gdrive : {};
+                    const hasSp = Object.keys(sp).length > 0;
+                    const hasGd = Object.keys(gd).length > 0;
                     if (hasSp) html += buildReportRow('SharePoint', sp);
                     if (hasGd) html += buildReportRow('Google Drive', gd);
-                    content.innerHTML = html;
+                } else {
+                    const rep = data.report && typeof data.report === 'object' ? data.report : {};
+                    if (Object.keys(rep).length > 0) {
+                        const label = service === 'sharepoint' ? 'SharePoint' : 'Google Drive';
+                        html += buildReportRow(label, rep);
+                    }
                 }
+
+                card.style.display = 'block';
+                content.innerHTML = html || 'No report yet. Start sync from the selected service to generate a summary.';
 
                 if (histEl) {
                     if (histRes.ok) {
@@ -1762,17 +1790,18 @@
 
         async function clearSyncReport() {
             try {
+                const { service } = getSyncReportFilters();
                 const res = await fetch('/sync/report/clear', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ service: 'all' }),
+                    body: JSON.stringify({ service }),
                 });
                 const data = await res.json();
                 if (!res.ok || !data.success) {
                     showToast((data && data.error) || 'Could not clear sync report', true);
                     return;
                 }
-                showToast('Sync report cleared');
+                showToast(`Sync report cleared (${service})`);
                 await refreshSyncReport();
             } catch (_) {
                 showToast('Could not clear sync report', true);
