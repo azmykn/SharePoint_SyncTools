@@ -187,7 +187,7 @@ class AppStore:
         key = KEY_SYNC_REPORT_SP if svc == "sharepoint" else KEY_SYNC_REPORT_GD
         self.set_json(key, report if isinstance(report, dict) else {})
 
-    def append_sync_report_history(self, report: dict, max_items: int = 100) -> None:
+    def append_sync_report_history(self, report: dict, max_items: int = 1000) -> None:
         """Append one sync report event to history (newest first, capped)."""
         if not isinstance(report, dict) or not report:
             return
@@ -197,10 +197,11 @@ class AppStore:
         cap = max(1, int(max_items))
         self.set_json(KEY_SYNC_REPORT_HISTORY, items[:cap])
 
-    def get_sync_report_history(self, service: str = "all", limit: int = 20) -> list[dict]:
-        """Get sync report history, optionally filtered by service."""
+    def get_sync_report_history(self, service: str = "all", limit: int = 20, query: str = "") -> list[dict]:
+        """Get sync report history, optionally filtered by service and free-text query."""
         svc = (service or "all").strip().lower()
         lim = max(1, int(limit))
+        q = (query or "").strip().lower()
         cur = self.get_json(KEY_SYNC_REPORT_HISTORY, None)
         items = cur if isinstance(cur, list) else []
         out: list[dict] = []
@@ -209,6 +210,18 @@ class AppStore:
                 continue
             if svc in ("sharepoint", "gdrive") and (it.get("service") or "").strip().lower() != svc:
                 continue
+            if q:
+                hay = " ".join([
+                    str(it.get("service") or ""),
+                    str(it.get("status") or ""),
+                    str(it.get("trigger") or ""),
+                    str(it.get("started_at") or ""),
+                    str(it.get("finished_at") or ""),
+                    str(it.get("message") or ""),
+                    " ".join(str(x) for x in (it.get("errors") or []) if x is not None),
+                ]).lower()
+                if q not in hay:
+                    continue
             out.append(it)
             if len(out) >= lim:
                 break

@@ -119,13 +119,51 @@ def _request_json() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _normalize_config_results(results: list[dict] | None, *, cap: int = 200) -> list[dict]:
+    out: list[dict] = []
+    for row in (results or []):
+        if not isinstance(row, dict):
+            continue
+        out.append({
+            'name': str(row.get('name') or 'unknown'),
+            'status': str(row.get('status') or 'unknown'),
+            'downloaded_files': int(row.get('downloaded_files') or 0),
+            'error': str(row.get('error') or ''),
+        })
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _prepare_sync_report(report: dict) -> dict:
+    """Fill derived report fields to keep API output consistent."""
+    r = dict(report or {})
+    elapsed = float(r.get('elapsed_sec') or 0.0)
+    downloaded = int(r.get('downloaded_files') or 0)
+    r['downloaded_files_per_sec'] = round((downloaded / elapsed), 4) if elapsed > 0 else 0.0
+
+    processed = int(r.get('configs_processed') or 0)
+    failed = int(r.get('configs_failed') or 0)
+    skipped = int(r.get('configs_skipped') or 0)
+    r['configs_ok'] = max(0, processed - failed)
+
+    skip_reasons = r.get('skipped_reasons')
+    if not isinstance(skip_reasons, dict):
+        skip_reasons = {'disabled': skipped} if skipped else {}
+    r['skipped_reasons'] = skip_reasons
+
+    r['config_results'] = _normalize_config_results(r.get('config_results'))
+    return r
+
+
 def _save_sync_report(service: str, report: dict) -> None:
     """Persist last sync report + append history entry; best-effort only."""
     try:
         from sp_sync.db.store import get_store
         store = get_store()
-        store.set_sync_report(service, report)
-        store.append_sync_report_history(report)
+        prepared = _prepare_sync_report(report)
+        store.set_sync_report(service, prepared)
+        store.append_sync_report_history(prepared)
     except Exception as exc:
         add_log('system', f"⚠️ Failed to save sync report ({service}): {exc}")
 
@@ -413,6 +451,7 @@ def sp_sync():
         processed = 0
         failed = 0
         skipped = 0
+        config_results: list[dict] = []
 
         try:
             from sp_sync.sharepoint.sync_engine import start_sync_from_config
@@ -420,7 +459,9 @@ def sp_sync():
             for config in sp_configs:
                 if not _sp_sync_enabled(config):
                     skipped += 1
-                    add_log('sharepoint', f"⏭️ Skipped (sync off): {config.get('name', 'SharePoint')}")
+                    cfg_name = config.get('name', 'SharePoint')
+                    config_results.append({'name': cfg_name, 'status': 'skipped', 'downloaded_files': 0, 'error': 'sync_disabled'})
+                    add_log('sharepoint', f"⏭️ Skipped (sync off): {cfg_name}")
                     continue
 
                 cfg_name = config.get('name', 'SharePoint')
@@ -431,11 +472,14 @@ def sp_sync():
                         fedauth, rtfa, sp_site(), config,
                         log_callback=lambda msg: add_log('sharepoint', msg)
                     )
-                    total += int(count or 0)
+                    downloaded = int(count or 0)
+                    total += downloaded
+                    config_results.append({'name': cfg_name, 'status': 'ok', 'downloaded_files': downloaded, 'error': ''})
                 except Exception as cfg_exc:
                     failed += 1
                     msg = f"{cfg_name}: {cfg_exc}"
                     errors.append(msg)
+                    config_results.append({'name': cfg_name, 'status': 'failed', 'downloaded_files': 0, 'error': str(cfg_exc)})
                     add_log('sharepoint', f"❌ Config failed: {msg}")
 
             if errors:
@@ -467,6 +511,8 @@ def sp_sync():
                 'configs_processed': processed,
                 'configs_failed': failed,
                 'configs_skipped': skipped,
+                'skipped_reasons': {'disabled': skipped} if skipped else {},
+                'config_results': config_results,
                 'errors': errors[:20],
                 'message': sync_status['sharepoint']['last_result'],
             })
@@ -1127,6 +1173,7 @@ def gdrive_sync():
         total = 0
         processed = 0
         failed = 0
+        config_results: list[dict] = []
 
         try:
             from sp_sync.gdrive import start_gdrive_sync
@@ -1140,11 +1187,14 @@ def gdrive_sync():
                         config['local_path'],
                         log_callback=lambda msg: add_log('gdrive', msg)
                     )
-                    total += int(count or 0)
+                    downloaded = int(count or 0)
+                    total += downloaded
+                    config_results.append({'name': cfg_name, 'status': 'ok', 'downloaded_files': downloaded, 'error': ''})
                 except Exception as cfg_exc:
                     failed += 1
                     msg = f"{cfg_name}: {cfg_exc}"
                     errors.append(msg)
+                    config_results.append({'name': cfg_name, 'status': 'failed', 'downloaded_files': 0, 'error': str(cfg_exc)})
                     add_log('gdrive', f"❌ Config failed: {msg}")
 
             if errors:
@@ -1176,6 +1226,8 @@ def gdrive_sync():
                 'configs_processed': processed,
                 'configs_failed': failed,
                 'configs_skipped': 0,
+                'skipped_reasons': {},
+                'config_results': config_results,
                 'errors': errors[:20],
                 'message': sync_status['gdrive']['last_result'],
             })
@@ -1428,7 +1480,7 @@ def sync_report_clear():
 
 @app.route('/sync/report/history')
 def sync_report_history():
-    """Get sync report history, optionally filtered by service."""
+    """Get sync report history, optionally filtered by service and query."""
     from sp_sync.db.store import get_store
 
     service = (request.args.get('service') or 'all').strip().lower()
@@ -1443,8 +1495,45 @@ def sync_report_history():
     if limit < 1 or limit > 200:
         return _json_error('limit must be between 1 and 200', 400, code='INVALID_LIMIT')
 
-    items = get_store().get_sync_report_history(service=service, limit=limit)
-    return jsonify({'success': True, 'service': service, 'limit': limit, 'items': items})
+    q = (request.args.get('q') or '').strip()
+    items = get_store().get_sync_report_history(service=service, limit=limit, query=q)
+    return jsonify({'success': True, 'service': service, 'limit': limit, 'q': q, 'items': items})
+
+
+@app.route('/sync/report/history/export')
+def sync_report_history_export():
+    """Export filtered sync report history as JSON file download."""
+    from sp_sync.db.store import get_store
+
+    service = (request.args.get('service') or 'all').strip().lower()
+    if service not in ('all', 'sharepoint', 'gdrive'):
+        return _json_error('service must be one of: all, sharepoint, gdrive', 400, code='INVALID_SERVICE')
+
+    raw_limit = (request.args.get('limit') or '50').strip()
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return _json_error('limit must be an integer', 400, code='INVALID_LIMIT')
+    if limit < 1 or limit > 500:
+        return _json_error('limit must be between 1 and 500', 400, code='INVALID_LIMIT')
+
+    q = (request.args.get('q') or '').strip()
+    items = get_store().get_sync_report_history(service=service, limit=limit, query=q)
+    payload = {
+        'exported_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'service': service,
+        'limit': limit,
+        'q': q,
+        'count': len(items),
+        'items': items,
+    }
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    fname = f"sync_report_history_{service}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    headers = {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Disposition': f'attachment; filename="{fname}"',
+    }
+    return Response(body, headers=headers)
 
 
 @app.route('/api/browse_folder')

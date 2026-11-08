@@ -253,6 +253,20 @@ class TestEnhancementRoutes(unittest.TestCase):
         self.assertEqual(hist_sp["service"], "sharepoint")
         self.assertTrue(all((it.get("service") == "sharepoint") for it in hist_sp["items"]))
 
+        # History endpoint (query filter)
+        res_hist_q = self.client.get("/sync/report/history?service=all&limit=10&q=partial")
+        self.assertEqual(res_hist_q.status_code, 200)
+        hist_q = res_hist_q.get_json()
+        self.assertTrue(hist_q["success"])
+        self.assertEqual(hist_q.get("q"), "partial")
+        self.assertTrue(all(("partial" in str((it.get("status") or "")).lower()) for it in hist_q["items"]))
+
+        # Export history JSON
+        res_export = self.client.get("/sync/report/history/export?service=all&limit=10&q=success")
+        self.assertEqual(res_export.status_code, 200)
+        self.assertIn("application/json", (res_export.headers.get("Content-Type") or ""))
+        self.assertIn("attachment; filename=", (res_export.headers.get("Content-Disposition") or ""))
+
         # Invalid history limit
         res_hist_bad_limit = self.client.get("/sync/report/history?service=all&limit=999")
         self.assertEqual(res_hist_bad_limit.status_code, 400)
@@ -299,6 +313,13 @@ class TestEnhancementRoutes(unittest.TestCase):
         clear_bad_data = res_clear_bad.get_json()
         self.assertFalse(clear_bad_data["success"])
         self.assertEqual(clear_bad_data.get("code"), "INVALID_SERVICE")
+
+        # Invalid export limit
+        res_export_bad_limit = self.client.get("/sync/report/history/export?service=all&limit=999")
+        self.assertEqual(res_export_bad_limit.status_code, 400)
+        export_bad_data = res_export_bad_limit.get_json()
+        self.assertFalse(export_bad_data["success"])
+        self.assertEqual(export_bad_data.get("code"), "INVALID_LIMIT")
 
 
 if __name__ == "__main__":
