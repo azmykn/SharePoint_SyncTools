@@ -3,148 +3,321 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign in | Google Drive</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <title>Google Drive Sign-in | Unified Sync Tool</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Inter', system-ui, sans-serif;
-            background: linear-gradient(135deg, #0f0f1a 0%, #16213e 100%);
+            background: linear-gradient(135deg, #0b0f19 0%, #1e1b4b 100%);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: #e8e8f0;
+            color: #f1f5f9;
+            padding: 20px;
         }
         .card {
-            background: rgba(30, 30, 50, 0.8);
-            backdrop-filter: blur(20px);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 20px;
+            background: rgba(30, 41, 59, 0.75);
+            backdrop-filter: blur(24px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
             padding: 40px;
-            max-width: 600px;
-            width: 90%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            max-width: 580px;
+            width: 100%;
+            box-shadow: 0 25px 70px rgba(0, 0, 0, 0.6);
         }
-        .icon { font-size: 3rem; text-align: center; margin-bottom: 20px; }
-        h1 { text-align: center; font-size: 1.5rem; font-weight: 800; margin-bottom: 8px; }
-        .subtitle { text-align: center; color: #9898b0; margin-bottom: 30px; font-size: 0.9rem; }
-        .step {
-            display: flex;
-            align-items: flex-start;
-            gap: 14px;
-            margin-bottom: 16px;
+        .icon { font-size: 3.5rem; text-align: center; margin-bottom: 16px; }
+        h1 { text-align: center; font-size: 1.6rem; font-weight: 800; margin-bottom: 8px; color: #fff; }
+        .subtitle { text-align: center; color: #94a3b8; margin-bottom: 28px; font-size: 0.95rem; line-height: 1.5; }
+        
+        .status-box {
             padding: 16px;
-            background: rgba(255,255,255,0.04);
-            border-radius: 12px;
-            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 14px;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
         }
-        .step-num {
-            min-width: 32px;
-            height: 32px;
-            background: linear-gradient(135deg, #4ecdc4, #00b4d8);
-            border-radius: 50%;
+        .status-connected {
+            background: rgba(16, 185, 129, 0.12);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+        .status-disconnected {
+            background: rgba(239, 68, 68, 0.12);
+            border-color: rgba(239, 68, 68, 0.25);
+        }
+
+        .btn-google {
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: 800;
-            font-size: 0.9rem;
-            flex-shrink: 0;
-        }
-        .step-text { line-height: 1.7; font-size: 0.95rem; }
-        .code-block {
-            background: #0a0a14;
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 10px;
-            padding: 14px 18px;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 0.85rem;
-            direction: ltr;
-            text-align: left;
-            color: #4ecdc4;
-            margin: 10px 0;
-            cursor: pointer;
-            user-select: all;
-        }
-        .btn {
-            display: block;
+            gap: 12px;
             width: 100%;
             padding: 16px;
-            background: linear-gradient(135deg, #34a853, #4ecdc4);
-            color: white;
+            background: #ffffff;
+            color: #1e293b;
             border: none;
-            border-radius: 12px;
-            font-family: 'Inter', system-ui, sans-serif;
-            font-size: 1rem;
+            border-radius: 14px;
+            font-size: 1.05rem;
             font-weight: 700;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        .btn-google:hover {
+            transform: translateY(-2px);
+            background: #f8fafc;
+            box-shadow: 0 8px 25px rgba(255,255,255,0.15);
+        }
+        .btn-google:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            display: block;
+            width: 100%;
+            padding: 14px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #e2e8f0;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 12px;
+            font-size: 0.95rem;
+            font-weight: 600;
             cursor: pointer;
             text-align: center;
             text-decoration: none;
-            margin-top: 24px;
-            transition: all 0.3s ease;
-        }
-        .btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(52,168,83,0.4); }
-        .note {
-            text-align: center;
-            color: #9898b0;
-            font-size: 0.8rem;
             margin-top: 14px;
+            transition: all 0.2s;
+        }
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.14);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            color: #f87171;
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-danger:hover {
+            background: rgba(239, 68, 68, 0.25);
+        }
+
+        .auth-progress {
+            display: none;
+            background: rgba(14, 165, 233, 0.1);
+            border: 1px solid rgba(14, 165, 233, 0.25);
+            border-radius: 14px;
+            padding: 20px;
+            margin-top: 20px;
+            text-align: center;
+        }
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid rgba(14, 165, 233, 0.2);
+            border-top-color: #38bdf8;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 12px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .accordion {
+            margin-top: 24px;
+            border-top: 1px solid rgba(255,255,255,0.08);
+            padding-top: 16px;
+        }
+        .accordion-header {
+            font-size: 0.85rem;
+            color: #94a3b8;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+            user-select: none;
+        }
+        .accordion-content {
+            display: none;
+            padding-top: 12px;
+        }
+        .form-input {
+            width: 100%;
+            padding: 12px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            color: #f8fafc;
+            font-family: inherit;
+            font-size: 0.88rem;
+            margin-bottom: 10px;
+            box-sizing: border-box;
         }
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="icon">🔐</div>
-        <h1>Google Drive sign-in</h1>
-        <p class="subtitle">Because of Google’s security model, the login helper must run as a separate process</p>
+        <div class="icon">📁</div>
+        <h1>Google Drive Connection</h1>
+        <p class="subtitle">Connect your Google Drive to sync and download shared folders automatically</p>
 
-        <div class="step">
-            <div class="step-num">1</div>
-            <div class="step-text">
-                Open a terminal in the project root (same folder as <code>gdrive_login.py</code>).
+        <div id="status-container" class="status-box {% if authenticated %}status-connected{% else %}status-disconnected{% endif %}">
+            <div>
+                <div style="font-weight: 700; font-size: 1rem; color: #fff;">
+                    <span id="status-icon">{% if authenticated %}✅{% else %}❌{% endif %}</span>
+                    <span id="status-text">{% if authenticated %}Connected{% else %}Not Connected{% endif %}</span>
+                </div>
+                <div id="status-user" style="font-size: 0.85rem; color: #94a3b8; margin-top: 3px;">
+                    {% if authenticated %}{{ user or 'Google Drive Account' }}{% else %}Sign-in required to browse and download folders{% endif %}
+                </div>
+            </div>
+            {% if authenticated %}
+                <button class="btn-danger" id="btn-disconnect" onclick="disconnectGdrive()">Disconnect</button>
+            {% endif %}
+        </div>
+
+        <div id="action-container">
+            {% if not authenticated %}
+                <button class="btn-google" id="btn-login" onclick="startLogin()">
+                    <svg width="20" height="20" viewBox="0 0 24 24">
+                        <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                        <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                        <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                        <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                    </svg>
+                    Sign in with Google
+                </button>
+            {% else %}
+                <a href="/" class="btn-google" style="background:#10b981; color:#fff;">
+                    🚀 Open Dashboard
+                </a>
+            {% endif %}
+        </div>
+
+        <div id="auth-progress" class="auth-progress">
+            <div class="spinner"></div>
+            <div style="font-weight: 700; margin-bottom: 6px;">Waiting for Google Authorization...</div>
+            <p style="font-size: 0.85rem; color: #94a3b8; margin-bottom: 12px;">
+                A browser tab was opened to grant read-only access.
+            </p>
+            <a id="auth-direct-link" href="#" target="_blank" style="color: #38bdf8; font-size: 0.88rem; text-decoration: underline;">
+                Click here if the tab did not open automatically ↗
+            </a>
+        </div>
+
+        <div class="accordion">
+            <div class="accordion-header" onclick="toggleAccordion('manual-box')">
+                <span>⚙️ Remote server or manual code exchange?</span>
+                <span id="manual-arrow">▼</span>
+            </div>
+            <div id="manual-box" class="accordion-content">
+                <p style="font-size: 0.8rem; color: #94a3b8; margin-bottom: 8px;">
+                    If running in a headless or remote container, paste the redirected URL or authorization code below:
+                </p>
+                <input type="text" id="manual-code" class="form-input" placeholder="http://localhost:.../?code=... or 4/0A...">
+                <button type="button" class="btn-secondary" style="margin-top:0;" onclick="submitManualCode()">Submit code</button>
             </div>
         </div>
 
-        <div class="step">
-            <div class="step-num">2</div>
-            <div class="step-text">
-                Run (click to copy). Use your venv’s Python if you use one:
-                <div class="code-block" id="gd-cmd" onclick="copyText(this)">python gdrive_login.py</div>
-                <span class="note" style="display:block;margin-top:8px;text-align:left;">
-                    Windows: <code>.venv\Scripts\python.exe gdrive_login.py</code><br>
-                    Linux/macOS: <code>.venv/bin/python gdrive_login.py</code>
-                </span>
-            </div>
-        </div>
-
-        <div class="step">
-            <div class="step-num">3</div>
-            <div class="step-text">
-                A browser window opens — complete Google sign-in and allow access.
-            </div>
-        </div>
-
-        <div class="step">
-            <div class="step-num">4</div>
-            <div class="step-text">
-                When it succeeds, return here and open the dashboard again.
-            </div>
-        </div>
-
-        <a href="/" class="btn">Done — back to dashboard</a>
-        <p class="note">After the first successful login you usually do not need to repeat this.</p>
+        <a href="/" class="btn-secondary">← Return to Dashboard</a>
     </div>
 
     <script>
-        const DEFAULT_CMD = 'python gdrive_login.py';
-        function copyText(el) {
-            navigator.clipboard.writeText(el.textContent.trim());
-            el.style.background = '#111';
-            el.textContent = 'Copied!';
-            setTimeout(() => {
-                el.style.background = '#0a0a14';
-                el.textContent = DEFAULT_CMD;
-            }, 2000);
+        let pollTimer = null;
+
+        function toggleAccordion(id) {
+            const el = document.getElementById(id);
+            const isHidden = el.style.display !== 'block';
+            el.style.display = isHidden ? 'block' : 'none';
+            document.getElementById('manual-arrow').textContent = isHidden ? '▲' : '▼';
+        }
+
+        async function startLogin() {
+            const btn = document.getElementById('btn-login');
+            if (btn) btn.disabled = true;
+
+            const progress = document.getElementById('auth-progress');
+            progress.style.display = 'block';
+
+            try {
+                const res = await fetch('/gdrive/auth/start', { method: 'POST' });
+                const data = await res.json();
+                if (data.success && data.auth_url) {
+                    const link = document.getElementById('auth-direct-link');
+                    link.href = data.auth_url;
+                    window.open(data.auth_url, '_blank');
+                    startPolling();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to start login'));
+                    progress.style.display = 'none';
+                    if (btn) btn.disabled = false;
+                }
+            } catch(e) {
+                alert('Connection error: ' + e);
+                progress.style.display = 'none';
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        function startPolling() {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(async () => {
+                try {
+                    const res = await fetch('/gdrive/auth/status');
+                    const data = await res.json();
+                    if (data.authenticated || data.flow_status === 'success') {
+                        clearInterval(pollTimer);
+                        document.getElementById('auth-progress').innerHTML = 
+                            '<div style="color:#10b981; font-weight:800; font-size:1.1rem;">✅ Connected successfully!</div><p style="color:#94a3b8; font-size:0.9rem; margin-top:6px;">Redirecting to dashboard...</p>';
+                        setTimeout(() => { window.location.href = '/'; }, 1500);
+                    } else if (data.flow_status === 'error') {
+                        clearInterval(pollTimer);
+                        alert('Authentication failed: ' + (data.error || 'Unknown error'));
+                        document.getElementById('auth-progress').style.display = 'none';
+                        const btn = document.getElementById('btn-login');
+                        if (btn) btn.disabled = false;
+                    }
+                } catch(e) {}
+            }, 1800);
+        }
+
+        async function submitManualCode() {
+            const val = document.getElementById('manual-code').value.trim();
+            if (!val) { alert('Please paste the code or response URL.'); return; }
+            try {
+                const res = await fetch('/gdrive/auth/code', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code: val })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert('Successfully connected as: ' + data.user_email);
+                    window.location.href = '/';
+                } else {
+                    alert('Exchange failed: ' + (data.error || 'Invalid code'));
+                }
+            } catch(e) { alert('Error: ' + e); }
+        }
+
+        async function disconnectGdrive() {
+            if (!confirm('Are you sure you want to disconnect Google Drive?')) return;
+            try {
+                const res = await fetch('/gdrive/auth/disconnect', { method: 'POST' });
+                if (res.ok) window.location.reload();
+            } catch(e) { alert('Error disconnecting: ' + e); }
         }
     </script>
 </body>

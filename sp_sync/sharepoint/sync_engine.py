@@ -1736,6 +1736,12 @@ def sync_sharepoint_files(
         root_path, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
         if root_path:
             share_root = root_path
+        elif guest.strip() and guest.strip() != share_u and _sp_sharing_url_has_stream_path(guest):
+            log(f"  ⚠️ Configured sharing link failed to resolve (HTTP {_st}). Falling back to active guest link.")
+            share_u = guest.strip()
+            root_path, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
+            if root_path:
+                share_root = root_path
     base = (sp_site_url or get_sp_site_url()).rstrip("/")
     warm_urls = []
     if share_u:
@@ -1852,6 +1858,23 @@ def _sync_folder_recursive(
         sharing_link_url=share_for_list or None,
         share_root_norm=share_root_norm,
     )
+    if not listing.get("ok"):
+        guest = load_guest_link().strip()
+        if guest and guest != share_for_list and _sp_sharing_url_has_stream_path(guest):
+            log(f"  ⚠️ Folder listing failed ({listing.get('error')}). Retrying with active guest link...")
+            root_path, _ = _sp_resolve_via_v2_share_driveitem(session, guest)
+            listing = list_folder_children_rest(
+                session,
+                base_site,
+                folder_rel_url,
+                timeout=120,
+                sharing_link_url=guest,
+                share_root_norm=root_path or share_root_norm,
+            )
+            if listing.get("ok"):
+                share_for_list = guest
+                share_root_norm = root_path or share_root_norm
+
     if not listing.get("ok"):
         err = listing.get("error") or "Folder listing failed"
         log(f"❌ Cannot list {folder_rel_url}: {err}")

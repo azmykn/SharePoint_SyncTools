@@ -806,7 +806,20 @@ def sp_save_guest_link():
 
     data = request.get_json(silent=True) or {}
     link = (data.get('guest_link') or data.get('url') or '').strip()
-    get_store().set_text(KEY_GUEST_LINK, link)
+    store = get_store()
+    store.set_text(KEY_GUEST_LINK, link)
+    if link:
+        try:
+            configs = store.get_sharepoint_configs()
+            updated = False
+            for c in configs:
+                if c.get('sharing_link'):
+                    c['sharing_link'] = link
+                    updated = True
+            if updated:
+                store.set_sharepoint_configs(configs)
+        except Exception as e:
+            add_log('sharepoint', f"⚠️ Failed to update config sharing links: {e}")
     add_log('sharepoint', 'Guest share link saved' if link else 'Guest share link cleared')
     return jsonify({'success': True})
 
@@ -816,16 +829,86 @@ def sp_save_guest_link():
 # ============================================================
 @app.route('/gdrive/auth')
 def gdrive_auth():
-    """Redirect to Google Drive auth instructions page."""
+    """Redirect to Google Drive auth page."""
     return redirect(url_for('gdrive_auth_page'))
 
 
 @app.route('/gdrive/auth_page')
 def gdrive_auth_page():
-    """Show instructions to run the standalone login script."""
+    """Interactive Google Drive sign-in page."""
+    from sp_sync.gdrive import is_authenticated, get_user_info, get_credentials, has_credentials
+    auth = is_authenticated()
+    user = get_user_info(get_credentials()) if auth else None
     return render_template('gdrive_auth.html',
-        login_script=os.path.join(ROOT, 'gdrive_login.py')
+        authenticated=auth,
+        user=user,
+        has_credentials=has_credentials()
     )
+
+
+@app.route('/gdrive/auth/start', methods=['POST'])
+def gdrive_auth_start():
+    """Start interactive OAuth2 login in background."""
+    from sp_sync.gdrive import start_oauth_flow
+    try:
+        res = start_oauth_flow(open_browser=True)
+        add_log('gdrive', '🔐 Google Drive authentication started in browser...')
+        return jsonify(res)
+    except FileNotFoundError as exc:
+        return jsonify({'success': False, 'error': str(exc), 'need_credentials': True}), 400
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/gdrive/auth/status', methods=['GET'])
+def gdrive_auth_status():
+    """Check current Google Drive authentication flow status."""
+    from sp_sync.gdrive import get_oauth_status
+    return jsonify(get_oauth_status())
+
+
+@app.route('/gdrive/auth/code', methods=['POST'])
+def gdrive_auth_code():
+    """Submit an authorization code or redirect response URL manually."""
+    data = request.get_json(silent=True) or {}
+    code = (data.get('code') or data.get('url') or '').strip()
+    from sp_sync.gdrive import complete_oauth_with_code
+    res = complete_oauth_with_code(code)
+    if res.get('success'):
+        add_log('gdrive', f"✅ Google Drive connected as {res.get('user_email')}")
+    return jsonify(res)
+
+
+@app.route('/gdrive/auth/disconnect', methods=['POST'])
+def gdrive_auth_disconnect():
+    """Disconnect Google Drive account."""
+    from sp_sync.gdrive import disconnect_gdrive
+    disconnect_gdrive()
+    add_log('gdrive', '🚪 Google Drive disconnected.')
+    return jsonify({'success': True})
+
+
+@app.route('/gdrive/upload_credentials', methods=['POST'])
+def gdrive_upload_credentials():
+    """Upload or update credentials.json from UI."""
+    from sp_sync.gdrive import save_credentials_content
+    content = ""
+    if 'file' in request.files:
+        f = request.files['file']
+        content = f.read().decode('utf-8', errors='replace')
+    else:
+        data = request.get_json(silent=True) or {}
+        content = (data.get('content') or '').strip()
+
+    if not content:
+        return jsonify({'success': False, 'error': 'No file or content provided.'}), 400
+
+    try:
+        save_credentials_content(content)
+        add_log('gdrive', '✅ Google credentials.json saved successfully.')
+        return jsonify({'success': True})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
 
 
 @app.route('/gdrive/get_folder_info', methods=['POST'])

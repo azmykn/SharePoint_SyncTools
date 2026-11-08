@@ -90,6 +90,24 @@ class TestWebRoutes(unittest.TestCase):
         data = res.get_json()
         self.assertIn("success", data)
 
+    def test_gdrive_auth_routes(self):
+        # /gdrive/auth_page
+        res_page = self.client.get("/gdrive/auth_page")
+        self.assertEqual(res_page.status_code, 200)
+        self.assertIn(b"Google Drive", res_page.data)
+
+        # /gdrive/auth/status
+        res_st = self.client.get("/gdrive/auth/status")
+        self.assertEqual(res_st.status_code, 200)
+        st_data = res_st.get_json()
+        self.assertIn("authenticated", st_data)
+        self.assertIn("flow_status", st_data)
+
+        # /gdrive/auth/disconnect
+        res_dc = self.client.post("/gdrive/auth/disconnect")
+        self.assertEqual(res_dc.status_code, 200)
+        self.assertTrue(res_dc.get_json()["success"])
+
 
 if __name__ == "__main__":
     unittest.main()
