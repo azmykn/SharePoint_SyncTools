@@ -16,6 +16,8 @@ KEY_SP_COOKIES = "sharepoint_cookies"
 KEY_GDRIVE_TOKEN = "gdrive_oauth_token"
 KEY_GUEST_LINK = "sharepoint_guest_link"
 KEY_SP_SITE_URL = "sharepoint_site_root_url"
+KEY_SYNC_REPORT_SP = "sync_report_sharepoint"
+KEY_SYNC_REPORT_GD = "sync_report_gdrive"
 
 _lock = threading.RLock()
 _store_singleton: Optional["AppStore"] = None
@@ -170,6 +172,19 @@ class AppStore:
 
     def set_sharepoint_site_url(self, url: str) -> None:
         self.set_text(KEY_SP_SITE_URL, (url or "").strip())
+
+    def get_sync_report(self, service: str) -> dict:
+        """Get last sync report for a service ('sharepoint' or 'gdrive')."""
+        svc = (service or "").strip().lower()
+        key = KEY_SYNC_REPORT_SP if svc == "sharepoint" else KEY_SYNC_REPORT_GD
+        v = self.get_json(key, None)
+        return v if isinstance(v, dict) else {}
+
+    def set_sync_report(self, service: str, report: dict) -> None:
+        """Persist last sync report for a service ('sharepoint' or 'gdrive')."""
+        svc = (service or "").strip().lower()
+        key = KEY_SYNC_REPORT_SP if svc == "sharepoint" else KEY_SYNC_REPORT_GD
+        self.set_json(key, report if isinstance(report, dict) else {})
 
 
 def get_store() -> AppStore:

@@ -9,6 +9,8 @@ optional $expand fallback, and __next pagination for large folders.
 from __future__ import annotations
 
 import base64
+import random
+import time
 import unicodedata
 import urllib.parse
 from typing import Any
@@ -16,6 +18,36 @@ from typing import Any
 # Pagination safety caps
 _MAX_PAGES = 50
 _MAX_ITEMS = 10000
+
+
+_RETRY_HTTP_STATUS = {429, 500, 502, 503, 504}
+
+
+def _request_get_with_retry(session, url: str, *, timeout: int, headers: dict[str, str] | None = None, retries: int = 2):
+    """GET helper with small exponential backoff for transient HTTP/network errors."""
+    delay = 0.4
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            req_kw: dict[str, Any] = {"timeout": timeout}
+            if headers is not None:
+                req_kw["headers"] = headers
+            resp = session.get(url, **req_kw)
+            if resp.status_code not in _RETRY_HTTP_STATUS or attempt >= retries:
+                return resp
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                raise
+
+        # jitter to avoid request bursts under rate limiting
+        sleep_for = delay + random.uniform(0, 0.25)
+        time.sleep(sleep_for)
+        delay = min(delay * 2, 2.5)
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("GET retry logic exhausted unexpectedly")
 
 
 def normalize_server_relative_folder_path(raw: str) -> str:
@@ -115,10 +147,13 @@ def fetch_odata_collection_all_pages(
 
     while url and pages < _MAX_PAGES and len(items) < _MAX_ITEMS:
         pages += 1
-        req_kw: dict[str, Any] = {"timeout": timeout}
-        if headers is not None:
-            req_kw["headers"] = headers
-        r = session.get(url, **req_kw)
+        r = _request_get_with_retry(
+            session,
+            url,
+            timeout=timeout,
+            headers=headers,
+            retries=2,
+        )
         last_status = r.status_code
         content_type = (r.headers.get("Content-Type") or "").split(";")[0].strip() or None
         if r.status_code != 200:
@@ -357,7 +392,7 @@ def _v2_shares_list_children(
 
             while cur_url and pages < _MAX_PAGES and len(val) < _MAX_ITEMS:
                 pages += 1
-                r = session.get(cur_url, timeout=timeout)
+                r = _request_get_with_retry(session, cur_url, timeout=timeout, retries=2)
                 st = r.status_code
                 last_ct = (r.headers.get("Content-Type") or "").split(";")[0].strip() or None
                 if st != 200:

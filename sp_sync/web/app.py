@@ -31,6 +31,15 @@ if sys.platform == "win32":
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session, Response
 
 from sp_sync.paths import project_root
+from sp_sync.sync_metrics import get_live_metrics, set_sync_active
+from sp_sync.scheduler import (
+    get_scheduler_settings,
+    save_scheduler_settings,
+    start_scheduler_daemon,
+    is_run_due,
+    is_scheduler_daemon_alive,
+    run_scheduler_now,
+)
 
 ROOT = project_root()
 
@@ -92,6 +101,32 @@ app = Flask(
     static_url_path="/static",
 )
 app.secret_key = os.urandom(24)
+
+
+def _json_error(message: str, status: int = 400, *, code: str | None = None, **extra):
+    """Consistent JSON API error payload."""
+    payload = {"success": False, "error": str(message)}
+    if code:
+        payload["code"] = code
+    if extra:
+        payload.update(extra)
+    return jsonify(payload), status
+
+
+def _request_json() -> dict:
+    """Safe request JSON extractor (never returns None)."""
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_sync_report(service: str, report: dict) -> None:
+    """Persist last sync report for service; best-effort only."""
+    try:
+        from sp_sync.db.store import get_store
+        get_store().set_sync_report(service, report)
+    except Exception as exc:
+        add_log('system', f"⚠️ Failed to save sync report ({service}): {exc}")
+
 
 # ============================================================
 # In-memory log buffer (thread-safe)
@@ -235,7 +270,8 @@ def index():
         gd_authenticated = is_authenticated()
         if gd_authenticated:
             creds = get_credentials()
-            gd_user = get_user_info(creds)
+            if creds is not None:
+                gd_user = get_user_info(creds)
     except ImportError as e:
         add_log('system', f'Google Drive module not available: {e}')
     except Exception as e:
@@ -267,18 +303,19 @@ def index():
         sp_site_configured=bool(sp_site().strip()),
         sp_site_url_display=sp_site(),
         sp_guest_link_display=get_store().get_guest_link(),
+        scheduler_settings=get_scheduler_settings(),
     )
 
 
 @app.route('/sp/save_cookies', methods=['POST'])
 def sp_save_cookies():
-    data = request.json
-    fedauth = data.get('fedauth', '').strip()
-    rtfa = data.get('rtfa', '').strip()
-    
+    data = _request_json()
+    fedauth = (data.get('fedauth') or '').strip()
+    rtfa = (data.get('rtfa') or '').strip()
+
     if not fedauth:
-        return jsonify({'success': False, 'error': 'FedAuth is required.'})
-    
+        return _json_error('FedAuth is required.', 400, code='MISSING_FEDAUTH')
+
     save_sp_cookies(fedauth, rtfa)
     add_log('sharepoint', '✅ Connection data saved.')
     return jsonify({'success': True})
@@ -321,17 +358,17 @@ def sp_auto_cookies():
 def sp_validate_cookies():
     """Validate SharePoint cookies."""
     try:
-        data = request.get_json()
-        fedauth = data.get('fedauth', '').strip()
-        rtfa = data.get('rtfa', '').strip()
-        
+        data = _request_json()
+        fedauth = (data.get('fedauth') or '').strip()
+        rtfa = (data.get('rtfa') or '').strip()
+
         if not fedauth or not rtfa:
-            return jsonify({'success': False, 'error': 'Both cookies are required for validation.'})
-        
+            return _json_error('Both cookies are required for validation.', 400, code='MISSING_COOKIES')
+
         result = validate_sp_cookies(fedauth, rtfa)
         return jsonify({'success': True, 'validation': result})
     except Exception as e:
-        return jsonify({'success': False, 'error': f'Validation error: {e}'})
+        return _json_error(f'Validation error: {e}', 500, code='COOKIE_VALIDATION_ERROR')
 
 
 @app.route('/validate_configs', methods=['GET'])
@@ -349,7 +386,7 @@ def validate_configs():
 def sp_sync():
     if sync_status['sharepoint']['running']:
         return jsonify({'success': False, 'error': 'A sync is already running.'})
-    
+
     fedauth, rtfa = load_sp_cookies()
     if not fedauth:
         return jsonify({'success': False, 'error': 'Please save FedAuth first.'})
@@ -363,33 +400,75 @@ def sp_sync():
         })
 
     sp_configs = load_sp_configs()
+
     def run_sync():
         sync_status['sharepoint']['running'] = True
+        started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        started_ts = time.time()
         add_log('sharepoint', '--- SharePoint sync started ---')
+        errors = []
+        total = 0
+        processed = 0
+        failed = 0
+        skipped = 0
+
         try:
             from sp_sync.sharepoint.sync_engine import start_sync_from_config
-            total = 0
+
             for config in sp_configs:
                 if not _sp_sync_enabled(config):
+                    skipped += 1
                     add_log('sharepoint', f"⏭️ Skipped (sync off): {config.get('name', 'SharePoint')}")
                     continue
-                add_log('sharepoint', f"📂 Syncing: {config['name']}...")
-                count = start_sync_from_config(
-                    fedauth, rtfa, sp_site(), config,
-                    log_callback=lambda msg: add_log('sharepoint', msg))
-                total += count
-            
-            result = f"✅ Done. Downloaded {total} new file(s)."
+
+                cfg_name = config.get('name', 'SharePoint')
+                processed += 1
+                add_log('sharepoint', f"📂 Syncing: {cfg_name}...")
+                try:
+                    count = start_sync_from_config(
+                        fedauth, rtfa, sp_site(), config,
+                        log_callback=lambda msg: add_log('sharepoint', msg)
+                    )
+                    total += int(count or 0)
+                except Exception as cfg_exc:
+                    failed += 1
+                    msg = f"{cfg_name}: {cfg_exc}"
+                    errors.append(msg)
+                    add_log('sharepoint', f"❌ Config failed: {msg}")
+
+            if errors:
+                result = f"⚠️ Done with errors. Downloaded {total} new file(s). Failed configs: {failed}."
+            else:
+                result = f"✅ Done. Downloaded {total} new file(s)."
             add_log('sharepoint', result)
             sync_status['sharepoint']['last_result'] = result
         except Exception as e:
             error_msg = f"❌ Error: {e}"
             add_log('sharepoint', error_msg)
             sync_status['sharepoint']['last_result'] = error_msg
+            errors.append(str(e))
+            failed = max(1, failed)
         finally:
+            finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            elapsed = round(time.time() - started_ts, 3)
             sync_status['sharepoint']['running'] = False
-            sync_status['sharepoint']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
+            sync_status['sharepoint']['last_run'] = finished_at
+            _save_sync_report('sharepoint', {
+                'service': 'sharepoint',
+                'trigger': 'manual',
+                'status': 'success' if not errors else ('partial' if processed > failed else 'error'),
+                'started_at': started_at,
+                'finished_at': finished_at,
+                'elapsed_sec': elapsed,
+                'downloaded_files': total,
+                'configs_total': len(sp_configs),
+                'configs_processed': processed,
+                'configs_failed': failed,
+                'configs_skipped': skipped,
+                'errors': errors[:20],
+                'message': sync_status['sharepoint']['last_result'],
+            })
+
     threading.Thread(target=run_sync, daemon=True).start()
     return jsonify({'success': True, 'message': 'Sync started in the background...'})
 
@@ -645,13 +724,13 @@ def sp_bulk_add():
 @app.route('/sp/add_folder', methods=['POST'])
 def sp_add_folder():
     """Add a new SharePoint folder to sync."""
-    data = request.json
-    name = data.get('name', '').strip()
-    rel_url = data.get('rel_url', '').strip()
-    local_path = data.get('local_path', '').strip()
-    
+    data = _request_json()
+    name = (data.get('name') or '').strip()
+    rel_url = (data.get('rel_url') or '').strip()
+    local_path = (data.get('local_path') or '').strip()
+
     if not rel_url or not local_path:
-        return jsonify({'success': False, 'error': 'Relative URL and local path are required.'})
+        return _json_error('Relative URL and local path are required.', 400, code='INVALID_SP_CONFIG')
     
     entry_type = (data.get('entry_type') or 'folder').strip().lower()
     if entry_type not in ('folder', 'file'):
@@ -680,27 +759,35 @@ def sp_add_folder():
 @app.route('/sp/remove_folder', methods=['POST'])
 def sp_remove_folder():
     """Remove a SharePoint folder config."""
-    data = request.json
-    index = data.get('index', -1)
+    data = _request_json()
+    try:
+        index = int(data.get('index', -1))
+    except (TypeError, ValueError):
+        return _json_error('Invalid index.', 400, code='INVALID_INDEX')
+
     configs = load_sp_configs()
     if 0 <= index < len(configs):
         removed = configs.pop(index)
         save_sp_configs(configs)
         add_log('sharepoint', f"🗑️ Folder removed: {removed.get('name', 'unknown')}")
         return jsonify({'success': True})
-    return jsonify({'success': False, 'error': 'Invalid index.'})
+    return _json_error('Invalid index.', 400, code='INVALID_INDEX')
 
 
 @app.route('/sp/update_folder', methods=['POST'])
 def sp_update_folder():
     """Update an existing SharePoint folder config."""
-    data = request.json
-    index = data.get('index', -1)
-    name = data.get('name', '').strip()
-    rel_url = data.get('rel_url', '').strip()
-    local_path = data.get('local_path', '').strip()
+    data = _request_json()
+    try:
+        index = int(data.get('index', -1))
+    except (TypeError, ValueError):
+        return _json_error('Invalid index.', 400, code='INVALID_INDEX')
+
+    name = (data.get('name') or '').strip()
+    rel_url = (data.get('rel_url') or '').strip()
+    local_path = (data.get('local_path') or '').strip()
     if not rel_url or not local_path:
-        return jsonify({'success': False, 'error': 'Relative URL and local path are required.'})
+        return _json_error('Relative URL and local path are required.', 400, code='INVALID_SP_CONFIG')
 
     entry_type = (data.get('entry_type') or 'folder').strip().lower()
     if entry_type not in ('folder', 'file'):
@@ -731,7 +818,7 @@ def sp_update_folder():
         save_sp_configs(configs)
         add_log('sharepoint', f"📝 Folder updated: {name}")
         return jsonify({'success': True})
-    return jsonify({'success': False, 'error': 'Invalid index.'})
+    return _json_error('Invalid index.', 400, code='INVALID_INDEX')
 
 
 @app.route('/sp/toggle_sync', methods=['POST'])
@@ -838,7 +925,8 @@ def gdrive_auth_page():
     """Interactive Google Drive sign-in page."""
     from sp_sync.gdrive import is_authenticated, get_user_info, get_credentials, has_credentials
     auth = is_authenticated()
-    user = get_user_info(get_credentials()) if auth else None
+    creds = get_credentials() if auth else None
+    user = get_user_info(creds) if creds is not None else None
     return render_template('gdrive_auth.html',
         authenticated=auth,
         user=user,
@@ -914,40 +1002,40 @@ def gdrive_upload_credentials():
 @app.route('/gdrive/get_folder_info', methods=['POST'])
 def gdrive_get_folder_info():
     """Fetch folder name from Google Drive URL."""
-    data = request.json
-    folder_url = data.get('folder_url', '').strip()
-    
+    data = _request_json()
+    folder_url = (data.get('folder_url') or '').strip()
+
     from sp_sync.gdrive import extract_folder_id, get_credentials, get_folder_metadata
     folder_id = extract_folder_id(folder_url)
     if not folder_id:
-        return jsonify({'success': False, 'error': 'Invalid URL.'})
-    
+        return _json_error('Invalid URL.', 400, code='INVALID_GDRIVE_URL')
+
     creds = get_credentials()
     if not creds or not creds.valid:
-        return jsonify({'success': False, 'error': 'Please sign in first.'})
-    
+        return _json_error('Please sign in first.', 401, code='GDRIVE_NOT_AUTHENTICATED')
+
     metadata = get_folder_metadata(creds, folder_id)
     if metadata:
         return jsonify({'success': True, 'name': metadata.get('name')})
-    
-    return jsonify({'success': False, 'error': 'Folder not found.'})
+
+    return _json_error('Folder not found.', 404, code='GDRIVE_FOLDER_NOT_FOUND')
 
 
 @app.route('/gdrive/add_folder', methods=['POST'])
 def gdrive_add_folder():
     """Add a new Google Drive folder to sync."""
-    data = request.json
-    folder_url = data.get('folder_url', '').strip()
-    local_path = data.get('local_path', '').strip()
-    name = data.get('name', '').strip()
-    
+    data = _request_json()
+    folder_url = (data.get('folder_url') or '').strip()
+    local_path = (data.get('local_path') or '').strip()
+    name = (data.get('name') or '').strip()
+
     if not folder_url or not local_path:
-        return jsonify({'success': False, 'error': 'Folder URL and local path are required.'})
-    
+        return _json_error('Folder URL and local path are required.', 400, code='INVALID_GDRIVE_CONFIG')
+
     from sp_sync.gdrive import extract_folder_id
     folder_id = extract_folder_id(folder_url)
     if not folder_id:
-        return jsonify({'success': False, 'error': 'Invalid Google Drive URL.'})
+        return _json_error('Invalid Google Drive URL.', 400, code='INVALID_GDRIVE_URL')
     
     configs = load_gdrive_configs()
     configs.append({
@@ -965,18 +1053,22 @@ def gdrive_add_folder():
 @app.route('/gdrive/update_folder', methods=['POST'])
 def gdrive_update_folder():
     """Update an existing Google Drive folder config."""
-    data = request.json
-    index = data.get('index', -1)
-    folder_url = data.get('folder_url', '').strip()
-    local_path = data.get('local_path', '').strip()
-    name = data.get('name', '').strip()
-    
+    data = _request_json()
+    try:
+        index = int(data.get('index', -1))
+    except (TypeError, ValueError):
+        return _json_error('Invalid index.', 400, code='INVALID_INDEX')
+
+    folder_url = (data.get('folder_url') or '').strip()
+    local_path = (data.get('local_path') or '').strip()
+    name = (data.get('name') or '').strip()
+
     configs = load_gdrive_configs()
     if 0 <= index < len(configs):
         from sp_sync.gdrive import extract_folder_id
         folder_id = extract_folder_id(folder_url)
         if not folder_id:
-            return jsonify({'success': False, 'error': 'Invalid Google Drive URL.'})
+            return _json_error('Invalid Google Drive URL.', 400, code='INVALID_GDRIVE_URL')
             
         configs[index] = {
             'name': name or f"Google Drive Folder ({folder_id[:8]}...)",
@@ -988,23 +1080,26 @@ def gdrive_update_folder():
         add_log('gdrive', f"📝 Folder updated: {name or folder_id}")
         return jsonify({'success': True})
     
-    return jsonify({'success': False, 'error': 'Invalid index.'})
+    return _json_error('Invalid index.', 400, code='INVALID_INDEX')
 
 
 @app.route('/gdrive/remove_folder', methods=['POST'])
 def gdrive_remove_folder():
     """Remove a Google Drive folder config."""
-    data = request.json
-    index = data.get('index', -1)
-    
+    data = _request_json()
+    try:
+        index = int(data.get('index', -1))
+    except (TypeError, ValueError):
+        return _json_error('Invalid index.', 400, code='INVALID_INDEX')
+
     configs = load_gdrive_configs()
     if 0 <= index < len(configs):
         removed = configs.pop(index)
         save_gdrive_configs(configs)
         add_log('gdrive', f"🗑️ Folder removed: {removed.get('name', 'unknown')}")
         return jsonify({'success': True})
-    
-    return jsonify({'success': False, 'error': 'Invalid index.'})
+
+    return _json_error('Invalid index.', 400, code='INVALID_INDEX')
 
 
 @app.route('/gdrive/sync', methods=['POST'])
@@ -1012,41 +1107,77 @@ def gdrive_sync():
     """Sync all configured Google Drive folders."""
     if sync_status['gdrive']['running']:
         return jsonify({'success': False, 'error': 'A sync is already running.'})
-    
+
     from sp_sync.gdrive import is_authenticated
     if not is_authenticated():
         return jsonify({'success': False, 'error': 'Please sign in to Google Drive first.'})
-    
+
     configs = load_gdrive_configs()
     if not configs:
         return jsonify({'success': False, 'error': 'No folders configured.'})
-    
+
     def run_sync():
         sync_status['gdrive']['running'] = True
+        started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        started_ts = time.time()
         add_log('gdrive', '--- Google Drive sync started ---')
+        errors = []
+        total = 0
+        processed = 0
+        failed = 0
+
         try:
             from sp_sync.gdrive import start_gdrive_sync
-            total = 0
             for config in configs:
-                add_log('gdrive', f"📂 Syncing: {config['name']}...")
-                count = start_gdrive_sync(
-                    config['folder_url'],
-                    config['local_path'],
-                    log_callback=lambda msg: add_log('gdrive', msg)
-                )
-                total += count
-            
-            result = f"✅ Done. Downloaded {total} new file(s)."
+                cfg_name = config.get('name', 'Google Drive')
+                processed += 1
+                add_log('gdrive', f"📂 Syncing: {cfg_name}...")
+                try:
+                    count = start_gdrive_sync(
+                        config['folder_url'],
+                        config['local_path'],
+                        log_callback=lambda msg: add_log('gdrive', msg)
+                    )
+                    total += int(count or 0)
+                except Exception as cfg_exc:
+                    failed += 1
+                    msg = f"{cfg_name}: {cfg_exc}"
+                    errors.append(msg)
+                    add_log('gdrive', f"❌ Config failed: {msg}")
+
+            if errors:
+                result = f"⚠️ Done with errors. Downloaded {total} new file(s). Failed configs: {failed}."
+            else:
+                result = f"✅ Done. Downloaded {total} new file(s)."
             add_log('gdrive', result)
             sync_status['gdrive']['last_result'] = result
         except Exception as e:
             error_msg = f"❌ Error: {e}"
             add_log('gdrive', error_msg)
             sync_status['gdrive']['last_result'] = error_msg
+            errors.append(str(e))
+            failed = max(1, failed)
         finally:
+            finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            elapsed = round(time.time() - started_ts, 3)
             sync_status['gdrive']['running'] = False
-            sync_status['gdrive']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    
+            sync_status['gdrive']['last_run'] = finished_at
+            _save_sync_report('gdrive', {
+                'service': 'gdrive',
+                'trigger': 'manual',
+                'status': 'success' if not errors else ('partial' if processed > failed else 'error'),
+                'started_at': started_at,
+                'finished_at': finished_at,
+                'elapsed_sec': elapsed,
+                'downloaded_files': total,
+                'configs_total': len(configs),
+                'configs_processed': processed,
+                'configs_failed': failed,
+                'configs_skipped': 0,
+                'errors': errors[:20],
+                'message': sync_status['gdrive']['last_result'],
+            })
+
     threading.Thread(target=run_sync, daemon=True).start()
     return jsonify({'success': True, 'message': 'Sync started in the background...'})
 
@@ -1066,28 +1197,60 @@ def sync_all():
                 sp_configs = load_sp_configs()
                 def run_sp():
                     sync_status['sharepoint']['running'] = True
+                    set_sync_active(True, service="sharepoint", queue_total=len(sp_configs))
+                    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    started_ts = time.time()
                     add_log('sharepoint', '--- SharePoint sync started ---')
+                    total = 0
+                    processed = 0
+                    failed = 0
+                    skipped = 0
+                    errors = []
                     try:
                         from sp_sync.sharepoint.sync_engine import start_sync_from_config
-                        total = 0
                         for config in sp_configs:
                             if not _sp_sync_enabled(config):
+                                skipped += 1
                                 add_log('sharepoint', f"⏭️ Skipped (sync off): {config.get('name', 'SharePoint')}")
                                 continue
+                            processed += 1
                             add_log('sharepoint', f"📂 Syncing: {config['name']}...")
-                            count = start_sync_from_config(
-                                fedauth, rtfa, sp_site(), config,
-                                log_callback=lambda msg: add_log('sharepoint', msg))
-                            total += count
-                        result = f"✅ Done. Downloaded {total} new file(s)."
+                            try:
+                                count = start_sync_from_config(
+                                    fedauth, rtfa, sp_site(), config,
+                                    log_callback=lambda msg: add_log('sharepoint', msg))
+                                total += int(count or 0)
+                            except Exception as cfg_exc:
+                                failed += 1
+                                errors.append(str(cfg_exc))
+                        result = f"✅ Done. Downloaded {total} new file(s)." if not errors else f"⚠️ Done with errors. Downloaded {total} new file(s). Failed configs: {failed}."
                         add_log('sharepoint', result)
                         sync_status['sharepoint']['last_result'] = result
                     except Exception as e:
                         add_log('sharepoint', f"❌ Error: {e}")
                         sync_status['sharepoint']['last_result'] = f"❌ Error: {e}"
+                        errors.append(str(e))
+                        failed = max(1, failed)
                     finally:
+                        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         sync_status['sharepoint']['running'] = False
-                        sync_status['sharepoint']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        sync_status['sharepoint']['last_run'] = finished_at
+                        set_sync_active(False)
+                        _save_sync_report('sharepoint', {
+                            'service': 'sharepoint',
+                            'trigger': 'sync_all',
+                            'status': 'success' if not errors else ('partial' if processed > failed else 'error'),
+                            'started_at': started_at,
+                            'finished_at': finished_at,
+                            'elapsed_sec': round(time.time() - started_ts, 3),
+                            'downloaded_files': total,
+                            'configs_total': len(sp_configs),
+                            'configs_processed': processed,
+                            'configs_failed': failed,
+                            'configs_skipped': skipped,
+                            'errors': errors[:20],
+                            'message': sync_status['sharepoint']['last_result'],
+                        })
                 threading.Thread(target=run_sp, daemon=True).start()
                 results['sharepoint'] = 'started'
     
@@ -1099,25 +1262,55 @@ def sync_all():
             if configs:
                 def run_gd():
                     sync_status['gdrive']['running'] = True
+                    set_sync_active(True, service="gdrive", queue_total=len(configs))
+                    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    started_ts = time.time()
                     add_log('gdrive', '--- Google Drive sync started ---')
+                    total = 0
+                    processed = 0
+                    failed = 0
+                    errors = []
                     try:
                         from sp_sync.gdrive import start_gdrive_sync
-                        total = 0
                         for config in configs:
+                            processed += 1
                             add_log('gdrive', f"📂 Syncing: {config['name']}...")
-                            count = start_gdrive_sync(
-                                config['folder_url'], config['local_path'],
-                                log_callback=lambda msg: add_log('gdrive', msg))
-                            total += count
-                        result = f"✅ Done. Downloaded {total} new file(s)."
+                            try:
+                                count = start_gdrive_sync(
+                                    config['folder_url'], config['local_path'],
+                                    log_callback=lambda msg: add_log('gdrive', msg))
+                                total += int(count or 0)
+                            except Exception as cfg_exc:
+                                failed += 1
+                                errors.append(str(cfg_exc))
+                        result = f"✅ Done. Downloaded {total} new file(s)." if not errors else f"⚠️ Done with errors. Downloaded {total} new file(s). Failed configs: {failed}."
                         add_log('gdrive', result)
                         sync_status['gdrive']['last_result'] = result
                     except Exception as e:
                         add_log('gdrive', f"❌ Error: {e}")
                         sync_status['gdrive']['last_result'] = f"❌ Error: {e}"
+                        errors.append(str(e))
+                        failed = max(1, failed)
                     finally:
+                        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         sync_status['gdrive']['running'] = False
-                        sync_status['gdrive']['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        sync_status['gdrive']['last_run'] = finished_at
+                        set_sync_active(False)
+                        _save_sync_report('gdrive', {
+                            'service': 'gdrive',
+                            'trigger': 'sync_all',
+                            'status': 'success' if not errors else ('partial' if processed > failed else 'error'),
+                            'started_at': started_at,
+                            'finished_at': finished_at,
+                            'elapsed_sec': round(time.time() - started_ts, 3),
+                            'downloaded_files': total,
+                            'configs_total': len(configs),
+                            'configs_processed': processed,
+                            'configs_failed': failed,
+                            'configs_skipped': 0,
+                            'errors': errors[:20],
+                            'message': sync_status['gdrive']['last_result'],
+                        })
                 threading.Thread(target=run_gd, daemon=True).start()
                 results['gdrive'] = 'started'
     
@@ -1188,6 +1381,48 @@ def get_status():
     return jsonify(sync_status)
 
 
+@app.route('/sync/report')
+def sync_report():
+    """Get last sync report for one service or both services."""
+    from sp_sync.db.store import get_store
+
+    service = (request.args.get('service') or 'all').strip().lower()
+    if service not in ('all', 'sharepoint', 'gdrive'):
+        return _json_error('service must be one of: all, sharepoint, gdrive', 400, code='INVALID_SERVICE')
+
+    store = get_store()
+    if service == 'all':
+        return jsonify({
+            'success': True,
+            'reports': {
+                'sharepoint': store.get_sync_report('sharepoint'),
+                'gdrive': store.get_sync_report('gdrive'),
+            }
+        })
+
+    return jsonify({'success': True, 'report': store.get_sync_report(service), 'service': service})
+
+
+@app.route('/sync/report/clear', methods=['POST'])
+def sync_report_clear():
+    """Clear last sync report for one service or both services."""
+    from sp_sync.db.store import get_store
+
+    data = _request_json()
+    service = (data.get('service') or request.args.get('service') or 'all').strip().lower()
+    if service not in ('all', 'sharepoint', 'gdrive'):
+        return _json_error('service must be one of: all, sharepoint, gdrive', 400, code='INVALID_SERVICE')
+
+    store = get_store()
+    if service in ('all', 'sharepoint'):
+        store.set_sync_report('sharepoint', {})
+    if service in ('all', 'gdrive'):
+        store.set_sync_report('gdrive', {})
+
+    add_log('system', f"🧹 Sync report cleared ({service})")
+    return jsonify({'success': True, 'service': service})
+
+
 @app.route('/api/browse_folder')
 def api_browse_folder():
     """Open a native folder selection dialog (when display is available)."""
@@ -1212,6 +1447,200 @@ def api_browse_folder():
             'success': False,
             'error': f'Native folder dialog unavailable: {e}',
         }), 200
+
+
+@app.route('/sync/live_metrics')
+def sync_live_metrics():
+    """Get real-time download metrics (file, speed, ETA, progress)."""
+    return jsonify(get_live_metrics())
+
+
+@app.route('/scheduler/settings', methods=['GET', 'POST'])
+def scheduler_settings_route():
+    """Get or update background sync scheduler settings."""
+    if request.method == 'POST':
+        data = _request_json()
+        try:
+            updated = save_scheduler_settings(data)
+        except ValueError as exc:
+            return _json_error(str(exc), 400, code='INVALID_SCHEDULER_SETTINGS')
+        except Exception as exc:
+            return _json_error(str(exc), 500, code='SCHEDULER_SETTINGS_SAVE_FAILED')
+
+        state_str = "enabled" if updated.get("enabled") else "disabled"
+        add_log('system', f"⏰ Scheduler {state_str}: every {updated.get('interval_hours')} hours (target={updated.get('target')})")
+        return jsonify({
+            'success': True,
+            'settings': updated,
+            'is_due': is_run_due(),
+            'daemon_alive': is_scheduler_daemon_alive(),
+        })
+
+    current = get_scheduler_settings()
+    return jsonify({
+        'success': True,
+        'settings': current,
+        'is_due': is_run_due(),
+        'daemon_alive': is_scheduler_daemon_alive(),
+    })
+
+
+@app.route('/scheduler/run_now', methods=['POST'])
+def scheduler_run_now_route():
+    """Force trigger scheduler callback now (manual admin/testing action)."""
+    data = _request_json()
+    target = (data.get('target') or '').strip().lower() or None
+    try:
+        result = run_scheduler_now(target)
+    except ValueError as exc:
+        return _json_error(str(exc), 400, code='INVALID_SCHEDULER_TARGET')
+    except RuntimeError as exc:
+        return _json_error(str(exc), 503, code='SCHEDULER_NOT_READY')
+    except Exception as exc:
+        return _json_error(str(exc), 500, code='SCHEDULER_RUN_NOW_FAILED')
+
+    add_log('system', f"▶️ Scheduler force-run requested (target={result.get('target')})")
+    return jsonify(result)
+
+
+@app.route('/api/open_local_folder', methods=['POST'])
+def api_open_local_folder():
+    """Open a local folder path in the OS native file manager."""
+    data = request.get_json(silent=True) or {}
+    folder_path = (data.get('folder_path') or data.get('path') or '').strip()
+    if not folder_path:
+        return jsonify({'success': False, 'error': 'No folder path provided.'}), 400
+
+    folder_path = os.path.abspath(os.path.expanduser(folder_path))
+    if not os.path.exists(folder_path):
+        # Create it if it doesn't exist yet
+        try:
+            os.makedirs(folder_path, exist_ok=True)
+        except Exception as exc:
+            return jsonify({'success': False, 'error': f'Folder does not exist and cannot be created: {exc}'}), 400
+
+    try:
+        import subprocess
+        if sys.platform == 'win32':
+            os.startfile(folder_path)
+        elif sys.platform == 'darwin':
+            subprocess.Popen(['open', folder_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(['xdg-open', folder_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return jsonify({'success': True})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+def _trigger_scheduled_sync(target="all"):
+    """Callback invoked by background scheduler daemon when an automatic run is due."""
+    try:
+        add_log('system', f"⏰ Scheduled auto-sync starting (target={target})...")
+        if target in ("all", "sharepoint") and not sync_status['sharepoint']['running']:
+            fedauth, rtfa = load_sp_cookies()
+            if fedauth and sp_site():
+                sp_configs = load_sp_configs()
+                def _do_sp():
+                    sync_status['sharepoint']['running'] = True
+                    set_sync_active(True, service="sharepoint", queue_total=len(sp_configs))
+                    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    started_ts = time.time()
+                    total = 0
+                    errors = []
+                    processed = 0
+                    failed = 0
+                    skipped = 0
+                    try:
+                        from sp_sync.sharepoint.sync_engine import start_sync_from_config
+                        for c in sp_configs:
+                            if not _sp_sync_enabled(c):
+                                skipped += 1
+                                continue
+                            processed += 1
+                            try:
+                                total += int(start_sync_from_config(fedauth, rtfa, sp_site(), c, log_callback=lambda m: add_log('sharepoint', m)) or 0)
+                            except Exception as cfg_exc:
+                                failed += 1
+                                errors.append(str(cfg_exc))
+                    except Exception as exc:
+                        errors.append(str(exc))
+                        failed = max(1, failed)
+                    finally:
+                        sync_status['sharepoint']['running'] = False
+                        set_sync_active(False)
+                        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        _save_sync_report('sharepoint', {
+                            'service': 'sharepoint',
+                            'trigger': 'scheduler',
+                            'status': 'success' if not errors else ('partial' if processed > failed else 'error'),
+                            'started_at': started_at,
+                            'finished_at': finished_at,
+                            'elapsed_sec': round(time.time() - started_ts, 3),
+                            'downloaded_files': total,
+                            'configs_total': len(sp_configs),
+                            'configs_processed': processed,
+                            'configs_failed': failed,
+                            'configs_skipped': skipped,
+                            'errors': errors[:20],
+                            'message': sync_status['sharepoint'].get('last_result', ''),
+                        })
+                threading.Thread(target=_do_sp, daemon=True).start()
+
+        if target in ("all", "gdrive") and not sync_status['gdrive']['running']:
+            from sp_sync.gdrive import is_authenticated
+            if is_authenticated():
+                gd_configs = load_gdrive_configs()
+                if gd_configs:
+                    def _do_gd():
+                        sync_status['gdrive']['running'] = True
+                        set_sync_active(True, service="gdrive", queue_total=len(gd_configs))
+                        started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        started_ts = time.time()
+                        total = 0
+                        errors = []
+                        processed = 0
+                        failed = 0
+                        try:
+                            from sp_sync.gdrive import start_gdrive_sync
+                            for c in gd_configs:
+                                processed += 1
+                                try:
+                                    total += int(start_gdrive_sync(c['folder_url'], c['local_path'], log_callback=lambda m: add_log('gdrive', m)) or 0)
+                                except Exception as cfg_exc:
+                                    failed += 1
+                                    errors.append(str(cfg_exc))
+                        except Exception as exc:
+                            errors.append(str(exc))
+                            failed = max(1, failed)
+                        finally:
+                            sync_status['gdrive']['running'] = False
+                            set_sync_active(False)
+                            finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            _save_sync_report('gdrive', {
+                                'service': 'gdrive',
+                                'trigger': 'scheduler',
+                                'status': 'success' if not errors else ('partial' if processed > failed else 'error'),
+                                'started_at': started_at,
+                                'finished_at': finished_at,
+                                'elapsed_sec': round(time.time() - started_ts, 3),
+                                'downloaded_files': total,
+                                'configs_total': len(gd_configs),
+                                'configs_processed': processed,
+                                'configs_failed': failed,
+                                'configs_skipped': 0,
+                                'errors': errors[:20],
+                                'message': sync_status['gdrive'].get('last_result', ''),
+                            })
+                    threading.Thread(target=_do_gd, daemon=True).start()
+    except Exception as exc:
+        add_log('system', f"❌ Scheduled sync error: {exc}")
+
+
+# Start scheduler daemon
+try:
+    start_scheduler_daemon(_trigger_scheduled_sync)
+except Exception as _exc:
+    pass
 
 
 if __name__ == "__main__":

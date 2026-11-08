@@ -309,6 +309,68 @@
             vertical-align: middle;
         }
 
+        /* Live Progress Widget */
+        .live-progress-card {
+            background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));
+            border: 1px solid rgba(59, 130, 246, 0.4);
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.35);
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+        .live-progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .live-pulse-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: #38bdf8;
+        }
+        .live-pulse-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #38bdf8;
+            box-shadow: 0 0 8px #38bdf8;
+            animation: pulseDot 1.5s infinite;
+        }
+        @keyframes pulseDot {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
+        .live-progress-bar-bg {
+            width: 100%;
+            height: 12px;
+            background: rgba(15, 23, 42, 0.8);
+            border-radius: 6px;
+            overflow: hidden;
+            margin-bottom: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .live-progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #3b82f6, #10b981);
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }
+        .live-progress-meta {
+            display: flex;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
     </style>
     <script defer src="{{ url_for('static', filename='js/ui_locale.js') }}"></script>
 </head>
@@ -349,6 +411,37 @@
         </div>
 
         <div class="content-area">
+            <!-- Live Download Progress Widget -->
+            <div id="live-progress-card" class="live-progress-card">
+                <div class="live-progress-header">
+                    <div class="live-pulse-indicator">
+                        <span class="live-pulse-dot"></span>
+                        <span id="live-status-label">Downloading in progress...</span>
+                    </div>
+                    <div id="live-queue-stats" style="font-size: 0.85rem; color: #94a3b8; font-weight: 500;"></div>
+                </div>
+                <div style="font-size: 0.95rem; font-weight: 600; color: #f8fafc; margin-bottom: 8px; word-break: break-all;" id="live-file-name">
+                    -
+                </div>
+                <div class="live-progress-bar-bg">
+                    <div id="live-progress-fill" class="live-progress-bar-fill"></div>
+                </div>
+                <div class="live-progress-meta">
+                    <span id="live-file-stats">0 MB / 0 MB (0%)</span>
+                    <span id="live-speed-eta" style="color: #38bdf8; font-weight: 500;">0 MB/s • ETA: --</span>
+                </div>
+            </div>
+
+            <div id="sync-report-card" class="card" style="margin-bottom:16px; border-color: rgba(52,211,153,0.35);">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div class="card-header" style="margin:0;">📊 Last sync summary</div>
+                    <div style="display:flex; gap:8px;">
+                        <button type="button" class="btn btn-outline btn-small" onclick="refreshSyncReport()">Refresh</button>
+                        <button type="button" class="btn btn-outline btn-small" onclick="clearSyncReport()">Clear</button>
+                    </div>
+                </div>
+                <div id="sync-report-content" style="margin-top:10px; color:var(--text-muted); font-size:0.9rem; line-height:1.6;">No report yet.</div>
+            </div>
             {% if not sp_site_configured %}
             <div class="card" style="border-color:#f59e0b;background:rgba(245,158,11,0.08);margin-bottom:16px;">
                 <div class="card-header" style="color:#fbbf24;">SharePoint site URL not set yet</div>
@@ -591,6 +684,68 @@
                         <a id="gd-auth-direct" href="#" target="_blank" style="color:#38bdf8; font-size:0.85rem; text-decoration:underline;">Click here if browser didn't open automatically ↗</a>
                     </div>
                 </div>
+
+                <div class="card">
+                    <div class="card-header">⏱️ Automated Background Sync Scheduler</div>
+                    <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 12px; line-height: 1.55;">
+                        Configure periodic background synchronization for all enabled SharePoint and Google Drive folders automatically.
+                    </p>
+                    <form id="scheduler-form" onsubmit="saveSchedulerSettings(event)">
+                        <div class="form-group" style="margin-bottom: 12px;">
+                            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;font-size:0.95rem;color:var(--text-main);font-weight:600;">
+                                <input type="checkbox" id="scheduler-enabled" {% if scheduler_settings and scheduler_settings.enabled %}checked{% endif %} style="transform: scale(1.2);">
+                                <span>Enable periodic background sync</span>
+                            </label>
+                        </div>
+                        <div class="form-grid" style="grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+                            <div class="form-group">
+                                <label>Sync Interval</label>
+                                <select class="form-input" id="scheduler-interval">
+                                    <option value="1" {% if scheduler_settings and scheduler_settings.interval_hours == 1 %}selected{% endif %}>Every 1 hour</option>
+                                    <option value="2" {% if scheduler_settings and scheduler_settings.interval_hours == 2 %}selected{% endif %}>Every 2 hours</option>
+                                    <option value="4" {% if scheduler_settings and scheduler_settings.interval_hours == 4 %}selected{% endif %}>Every 4 hours</option>
+                                    <option value="6" {% if scheduler_settings and scheduler_settings.interval_hours == 6 %}selected{% endif %}>Every 6 hours</option>
+                                    <option value="12" {% if scheduler_settings and scheduler_settings.interval_hours == 12 %}selected{% endif %}>Every 12 hours</option>
+                                    <option value="24" {% if scheduler_settings and scheduler_settings.interval_hours == 24 %}selected{% endif %}>Every 24 hours (Once daily)</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>Target Services</label>
+                                <select class="form-input" id="scheduler-target">
+                                    <option value="all" {% if not scheduler_settings or scheduler_settings.target == 'all' %}selected{% endif %}>All (SharePoint & Google Drive)</option>
+                                    <option value="sharepoint" {% if scheduler_settings and scheduler_settings.target == 'sharepoint' %}selected{% endif %}>SharePoint Only</option>
+                                    <option value="gdrive" {% if scheduler_settings and scheduler_settings.target == 'gdrive' %}selected{% endif %}>Google Drive Only</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
+                            {% if scheduler_settings and scheduler_settings.last_run_iso %}
+                                <span>Last scheduled run: <strong style="color:var(--text-main);" id="scheduler-last-run">{{ scheduler_settings.last_run_iso }}</strong></span>
+                            {% else %}
+                                <span id="scheduler-last-run">No scheduled runs recorded yet.</span>
+                            {% endif %}
+                        </div>
+                        <div id="scheduler-health" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">Daemon: checking... • Due now: --</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                            <button type="submit" class="btn">Save scheduler settings</button>
+                            <button type="button" class="btn btn-outline" onclick="schedulerRunNow()">Run now</button>
+                            <button type="button" class="btn btn-outline" onclick="refreshSchedulerHealth()">Refresh status</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">🔔 Desktop & Browser Notifications</div>
+                    <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 12px; line-height: 1.55;">
+                        Receive native desktop notifications when sync completes, even when this browser tab is in the background.
+                    </p>
+                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <button type="button" class="btn btn-outline" id="btn-request-notify" onclick="toggleDesktopNotifications()">
+                            🔔 Enable desktop notifications
+                        </button>
+                        <span id="notify-status-text" style="font-size: 0.85rem; color: var(--text-muted);">Status: Checking...</span>
+                    </div>
+                </div>
             </div>
 
             <!-- Logs Tab -->
@@ -720,6 +875,7 @@
                         <div class="item-subtitle">${escapeHtml(f.rel_url)} ➔ ${escapeHtml(f.local_path)}</div>
                     </div>
                     <div class="item-actions">
+                        <button type="button" class="btn btn-small btn-outline" onclick="openLocalFolder('${escapeHtml(f.local_path)}')" title="Open folder in file manager">📂</button>
                         <button type="button" class="${syncBtnClass}" onclick="toggleSpSync(${idx})" title="${syncBtnTitle}">${syncBtnIcon}</button>
                         <button type="button" class="btn btn-small btn-outline" onclick="editSP(${idx})">✏️</button>
                         <button type="button" class="btn btn-small btn-danger" onclick="deleteSP(${idx})">🗑️</button>
@@ -896,10 +1052,11 @@
                 const el = document.createElement('div'); el.className = 'item-card';
                 el.innerHTML = `
                     <div class="item-info">
-                        <div class="item-title">${f.name}</div>
-                        <div class="item-subtitle">${f.local_path}</div>
+                        <div class="item-title">${escapeHtml(f.name)}</div>
+                        <div class="item-subtitle">${escapeHtml(f.folder_url)} ➔ ${escapeHtml(f.local_path)}</div>
                     </div>
                     <div class="item-actions">
+                        <button type="button" class="btn btn-small btn-outline" onclick="openLocalFolder('${escapeHtml(f.local_path)}')" title="Open folder in file manager">📂</button>
                         <button class="btn btn-small btn-outline" onclick="editGD(${idx})">✏️</button>
                         <button class="btn btn-small btn-danger" onclick="deleteGD(${idx})">🗑️</button>
                     </div>
@@ -1260,11 +1417,316 @@
             } catch(e) {}
         }
 
+        // --- Native Folder Opener ---
+        async function openLocalFolder(folderPath) {
+            if (!folderPath) {
+                showToast('No path specified', true);
+                return;
+            }
+            try {
+                const res = await fetch('/api/open_local_folder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ folder_path: folderPath }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Opening folder in file manager...');
+                } else {
+                    showToast(data.error || 'Could not open folder', true);
+                }
+            } catch (err) {
+                showToast('Error opening folder', true);
+            }
+        }
+
+        // --- Scheduler Settings ---
+        function updateSchedulerHealthUi(payload) {
+            const healthEl = document.getElementById('scheduler-health');
+            const lastEl = document.getElementById('scheduler-last-run');
+            if (!payload || !payload.settings) return;
+            const st = payload.settings;
+            if (lastEl) {
+                if (st.last_run) {
+                    lastEl.innerHTML = `Last scheduled run: <strong style="color:var(--text-main);">${st.last_run}</strong>`;
+                } else {
+                    lastEl.textContent = 'No scheduled runs recorded yet.';
+                }
+            }
+            if (healthEl) {
+                const daemonText = payload.daemon_alive ? 'Alive ✅' : 'Stopped ❌';
+                const dueText = payload.is_due ? 'Yes' : 'No';
+                healthEl.textContent = `Daemon: ${daemonText} • Due now: ${dueText}`;
+            }
+        }
+
+        async function saveSchedulerSettings(e) {
+            e.preventDefault();
+            const enabled = document.getElementById('scheduler-enabled').checked;
+            const interval_hours = parseInt(document.getElementById('scheduler-interval').value, 10);
+            const target = document.getElementById('scheduler-target').value;
+            try {
+                const res = await fetch('/scheduler/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled, interval_hours, target }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('Scheduler settings saved');
+                    updateSchedulerHealthUi(data);
+                } else {
+                    showToast(data.error || 'Failed to save scheduler', true);
+                }
+            } catch (_) {
+                showToast('Error saving scheduler settings', true);
+            }
+        }
+
+        async function refreshSchedulerHealth() {
+            try {
+                const res = await fetch('/scheduler/settings');
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    showToast((data && data.error) || 'Could not read scheduler status', true);
+                    return;
+                }
+                updateSchedulerHealthUi(data);
+            } catch (_) {
+                showToast('Could not read scheduler status', true);
+            }
+        }
+
+        async function schedulerRunNow() {
+            const target = document.getElementById('scheduler-target')?.value || 'all';
+            try {
+                const res = await fetch('/scheduler/run_now', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target }),
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    showToast((data && data.error) || 'Scheduler run-now failed', true);
+                    return;
+                }
+                showToast(`Scheduler run triggered (${data.target})`);
+                await refreshSchedulerHealth();
+            } catch (_) {
+                showToast('Scheduler run-now failed', true);
+            }
+        }
+
+        // --- Live Progress Metrics & Notifications ---
+        let wasSyncActive = false;
+
+        function formatEta(seconds) {
+            if (seconds === null || seconds === undefined || seconds < 0 || !isFinite(seconds)) return '--';
+            if (seconds < 60) return `${Math.round(seconds)}s`;
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.round(seconds % 60);
+            if (mins < 60) return `${mins}m ${secs}s`;
+            const hrs = Math.floor(mins / 60);
+            const remMins = mins % 60;
+            return `${hrs}h ${remMins}m`;
+        }
+
+        function formatBytes(bytes) {
+            if (!bytes || bytes <= 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB'];
+            let i = 0;
+            let b = bytes;
+            while (b >= 1024 && i < units.length - 1) {
+                b /= 1024;
+                i++;
+            }
+            return `${b.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+        }
+
+        async function pollLiveMetrics() {
+            try {
+                const res = await fetch('/sync/live_metrics');
+                if (!res.ok) return;
+                const data = await res.json();
+                const card = document.getElementById('live-progress-card');
+                if (!card) return;
+
+                if (data.is_active) {
+                    card.style.display = 'block';
+                    const nameEl = document.getElementById('live-file-name');
+                    const fillEl = document.getElementById('live-progress-fill');
+                    const statsEl = document.getElementById('live-file-stats');
+                    const speedEtaEl = document.getElementById('live-speed-eta');
+                    const queueEl = document.getElementById('live-queue-stats');
+
+                    if (data.current_file) {
+                        nameEl.textContent = data.current_file;
+                    } else {
+                        nameEl.textContent = 'Sync engine active (preparing files / muxing...)';
+                    }
+
+                    const pct = Math.min(100, Math.max(0, data.percent || 0));
+                    fillEl.style.width = pct + '%';
+                    
+                    statsEl.textContent = `${formatBytes(data.bytes_transferred)} / ${formatBytes(data.total_bytes)} (${pct.toFixed(1)}%)`;
+                    speedEtaEl.textContent = `${(data.speed_mb_s || 0).toFixed(2)} MB/s • ETA: ${formatEta(data.eta_seconds)}`;
+                    
+                    if (data.total_files > 0) {
+                        queueEl.textContent = `Completed: ${data.files_completed} / ${data.total_files}`;
+                    } else {
+                        queueEl.textContent = '';
+                    }
+                    wasSyncActive = true;
+                } else {
+                    if (wasSyncActive) {
+                        wasSyncActive = false;
+                        card.style.display = 'none';
+                        notifyDesktopSyncDone();
+                        showToast('🎉 All downloads completed successfully!');
+                    } else {
+                        card.style.display = 'none';
+                    }
+                }
+            } catch (_) {}
+        }
+
+        function initNotificationStatus() {
+            const statusText = document.getElementById('notify-status-text');
+            const btn = document.getElementById('btn-request-notify');
+            if (!('Notification' in window)) {
+                if (statusText) statusText.textContent = 'Not supported in this browser';
+                if (btn) btn.style.display = 'none';
+                return;
+            }
+            if (Notification.permission === 'granted') {
+                if (statusText) statusText.textContent = '✅ Notifications enabled';
+                if (btn) {
+                    btn.textContent = '🔔 Notifications active';
+                    btn.disabled = true;
+                }
+            } else if (Notification.permission === 'denied') {
+                if (statusText) statusText.textContent = '❌ Blocked in browser settings';
+            } else {
+                if (statusText) statusText.textContent = 'Click button to grant permission';
+            }
+        }
+
+        async function toggleDesktopNotifications() {
+            if (!('Notification' in window)) return;
+            try {
+                const perm = await Notification.requestPermission();
+                initNotificationStatus();
+                if (perm === 'granted') {
+                    showToast('Desktop notifications enabled!');
+                    try {
+                        new Notification('SharePoint SyncTools', {
+                            body: 'Desktop notifications are now enabled.',
+                        });
+                    } catch (_) {}
+                }
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function notifyDesktopSyncDone() {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                try {
+                    new Notification('SharePoint SyncTools', {
+                        body: 'Synchronization finished successfully!',
+                    });
+                } catch (_) {}
+            }
+        }
+
+        function fmtReportTime(s) {
+            if (!s) return '-';
+            return s;
+        }
+
+        function buildReportRow(label, report) {
+            const statusRaw = (report.status || 'unknown').toLowerCase();
+            const badgeColor = statusRaw === 'success' ? '#34d399' : (statusRaw === 'partial' ? '#f59e0b' : '#f87171');
+            const errs = Array.isArray(report.errors) ? report.errors : [];
+            const errLine = errs.length ? `<div style="margin-top:6px;color:#fca5a5;">Errors: ${errs.slice(0, 2).join(' | ')}</div>` : '';
+            return `
+                <div style="padding:10px 12px;border:1px solid rgba(148,163,184,0.25);border-radius:10px;background:rgba(15,23,42,0.35);margin-bottom:8px;">
+                    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
+                        <strong style="color:var(--text-main)">${label}</strong>
+                        <span style="padding:2px 8px;border-radius:999px;border:1px solid ${badgeColor};color:${badgeColor};font-size:0.78rem;text-transform:uppercase;">${statusRaw}</span>
+                    </div>
+                    <div style="margin-top:6px;">
+                        Downloaded: <strong style="color:var(--text-main)">${report.downloaded_files || 0}</strong>
+                        • Configs: <strong style="color:var(--text-main)">${report.configs_processed || 0}</strong>/<strong style="color:var(--text-main)">${report.configs_total || 0}</strong>
+                        • Failed: <strong style="color:var(--text-main)">${report.configs_failed || 0}</strong>
+                    </div>
+                    <div style="margin-top:4px;">
+                        Trigger: ${report.trigger || '-'} • Duration: ${report.elapsed_sec ?? '-'}s • Finished: ${fmtReportTime(report.finished_at)}
+                    </div>
+                    ${errLine}
+                </div>
+            `;
+        }
+
+        async function refreshSyncReport() {
+            try {
+                const res = await fetch('/sync/report');
+                if (!res.ok) return;
+                const data = await res.json();
+                if (!data.success) return;
+                const card = document.getElementById('sync-report-card');
+                const content = document.getElementById('sync-report-content');
+                if (!card || !content) return;
+
+                const sp = data.reports && data.reports.sharepoint ? data.reports.sharepoint : {};
+                const gd = data.reports && data.reports.gdrive ? data.reports.gdrive : {};
+                const hasSp = Object.keys(sp).length > 0;
+                const hasGd = Object.keys(gd).length > 0;
+
+                if (!hasSp && !hasGd) {
+                    card.style.display = 'block';
+                    content.innerHTML = 'No report yet. Start sync from any service to generate a summary.';
+                    return;
+                }
+
+                card.style.display = 'block';
+                let html = '';
+                if (hasSp) html += buildReportRow('SharePoint', sp);
+                if (hasGd) html += buildReportRow('Google Drive', gd);
+                content.innerHTML = html;
+            } catch (_) {}
+        }
+
+        async function clearSyncReport() {
+            try {
+                const res = await fetch('/sync/report/clear', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ service: 'all' }),
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    showToast((data && data.error) || 'Could not clear sync report', true);
+                    return;
+                }
+                showToast('Sync report cleared');
+                await refreshSyncReport();
+            } catch (_) {
+                showToast('Could not clear sync report', true);
+            }
+        }
+
         // Initialize lists and polling
         renderSPList();
         renderGDList();
+        initNotificationStatus();
         setInterval(refreshLogs, 2000);
         refreshLogs();
+        setInterval(pollLiveMetrics, 1200);
+        pollLiveMetrics();
+        setInterval(refreshSyncReport, 5000);
+        refreshSyncReport();
+        refreshSchedulerHealth();
 
         (function applyUrlTab() {
             try {

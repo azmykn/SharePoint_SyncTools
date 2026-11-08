@@ -17,12 +17,14 @@ import os
 import io
 import re
 import json
+import shutil
 import logging
 import threading
 import webbrowser
 import wsgiref.simple_server
 from typing import Optional, Dict, Any, List
 
+import requests
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow, _RedirectWSGIApp, _WSGIRequestHandler
 from google.auth.transport.requests import Request
@@ -31,6 +33,11 @@ from googleapiclient.http import MediaIoBaseDownload
 
 from sp_sync.paths import project_root
 from sp_sync.db.store import get_store, KEY_GDRIVE_TOKEN
+from sp_sync.sync_metrics import (
+    start_file_progress,
+    update_file_progress,
+    complete_file_progress,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -425,8 +432,54 @@ def list_folder_contents(creds: Credentials, folder_id: str) -> List[Dict[str, A
     return results
 
 
+def download_public_gdrive_file(file_id: str, local_path: str, log=print) -> bool:
+    """Download a publicly shared Google Drive file without credentials."""
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+
+    try:
+        res = session.get(url, stream=True, timeout=30)
+        confirm_token = None
+        for k, v in res.cookies.items():
+            if k.startswith("download_warning"):
+                confirm_token = v
+                break
+        if not confirm_token:
+            match = re.search(r'confirm=([0-9A-Za-z_]+)', res.text)
+            if match:
+                confirm_token = match.group(1)
+
+        if confirm_token:
+            confirm_url = f"https://drive.google.com/uc?export=download&confirm={confirm_token}&id={file_id}"
+            res = session.get(confirm_url, stream=True, timeout=30)
+
+        if res.status_code in (200, 206):
+            part_path = local_path + ".part"
+            tot = int(res.headers.get("Content-Length", 0) or 0)
+            dl = 0
+            start_file_progress(os.path.basename(os.path.dirname(local_path)), os.path.basename(local_path), tot)
+            with open(part_path, "wb") as f:
+                for chunk in res.iter_content(chunk_size=65536):
+                    f.write(chunk)
+                    dl += len(chunk)
+                    update_file_progress(dl, tot)
+            os.replace(part_path, local_path)
+            complete_file_progress(os.path.basename(local_path))
+            return True
+    except Exception as exc:
+        log(f"    ❌ Public download failed: {exc}")
+        part = local_path + ".part"
+        if os.path.exists(part):
+            try:
+                os.remove(part)
+            except Exception:
+                pass
+    return False
+
+
 def sync_gdrive_folder(
-    creds: Credentials,
+    creds: Optional[Credentials],
     folder_id: str,
     local_dir: str,
     log_callback=None,
@@ -443,6 +496,25 @@ def sync_gdrive_folder(
             print(msg)
 
     os.makedirs(local_dir, exist_ok=True)
+
+    # Check available disk space
+    try:
+        _, _, free = shutil.disk_usage(local_dir)
+        if free < 2 * 1024 * 1024 * 1024:
+            log(f"⚠️ Warning: Low disk space! Only {free / (1024**3):.1f} GB remaining on target drive.")
+    except Exception:
+        pass
+
+    if not creds:
+        # Fallback to public file download if this is a single file ID
+        target_path = os.path.join(local_dir, f"drive_file_{folder_id}")
+        log(f"ℹ️ Trying public Google Drive download for ID {folder_id}...")
+        if download_public_gdrive_file(folder_id, target_path, log):
+            log(f"✅ Downloaded public Google Drive file: {os.path.basename(target_path)}")
+            return 1
+        log("❌ Cannot list private folder without Google sign-in. Sign in via web dashboard.")
+        return 0
+
     service = build('drive', 'v3', credentials=creds, cache_discovery=False)
     items = list_folder_contents(creds, folder_id)
 
@@ -475,6 +547,8 @@ def sync_gdrive_folder(
                 continue
 
             log(f"{indent}[+] Exporting '{safe_name}'...")
+            part_path = local_path + ".part"
+            start_file_progress(os.path.basename(local_dir), safe_name, 0)
             try:
                 request = service.files().export_media(fileId=file_id, mimeType=export_mime)
                 fh = io.BytesIO()
@@ -483,12 +557,17 @@ def sync_gdrive_folder(
                 while not done:
                     _, done = downloader.next_chunk()
 
-                with open(local_path, 'wb') as f:
+                with open(part_path, 'wb') as f:
                     f.write(fh.getvalue())
+                os.replace(part_path, local_path)
+                complete_file_progress(safe_name)
                 log(f"{indent}✅ Exported '{safe_name}'")
                 downloaded_count += 1
             except Exception as e:
                 log(f"{indent}❌ Export failed for '{safe_name}': {e}")
+                if os.path.exists(part_path):
+                    try: os.remove(part_path)
+                    except Exception: pass
             continue
 
         # Regular file download
@@ -508,28 +587,35 @@ def sync_gdrive_folder(
         sz_str = f" ({sz_mb:.1f} MB)" if sz_mb > 0 else ""
         log(f"{indent}[+] Downloading '{safe_name}'{sz_str}...")
 
+        part_path = local_path + ".part"
+        start_file_progress(os.path.basename(local_dir), safe_name, remote_size)
         try:
             request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
-            with io.FileIO(local_path, 'wb') as fh:
+            with io.FileIO(part_path, 'wb') as fh:
                 downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
                 done = False
                 last_pct = 0
                 while not done:
                     status, done = downloader.next_chunk()
-                    if status and sz_mb > 50:
-                        pct = int(status.progress() * 100)
-                        if pct >= last_pct + 25:
-                            log(f"{indent}  📊 Progress: {pct}%")
-                            last_pct = pct
+                    if status:
+                        cur_bytes = int(status.progress() * remote_size) if remote_size else 0
+                        update_file_progress(cur_bytes, remote_size)
+                        if sz_mb > 50:
+                            pct = int(status.progress() * 100)
+                            if pct >= last_pct + 25:
+                                log(f"{indent}  📊 Progress: {pct}%")
+                                last_pct = pct
 
+            os.replace(part_path, local_path)
+            complete_file_progress(safe_name)
             final_sz = os.path.getsize(local_path) / (1024 * 1024)
             log(f"{indent}✅ Downloaded '{safe_name}' ({final_sz:.1f} MB)")
             downloaded_count += 1
         except Exception as e:
             log(f"{indent}❌ Download failed for '{safe_name}': {e}")
-            if os.path.exists(local_path):
+            if os.path.exists(part_path):
                 try:
-                    os.remove(local_path)
+                    os.remove(part_path)
                 except Exception:
                     pass
 
@@ -551,7 +637,12 @@ def start_gdrive_sync(folder_url: str, local_dir: str, log_callback=None) -> int
 
     creds = get_credentials()
     if not creds or not creds.valid:
-        log("❌ Sign in to Google Drive first via the web dashboard.")
+        # Check if public download works
+        target_path = os.path.join(local_dir, f"drive_file_{folder_id}")
+        if download_public_gdrive_file(folder_id, target_path, log):
+            log(f"🎉 Downloaded public Google Drive file: {os.path.basename(target_path)}")
+            return 1
+        log("❌ Sign in to Google Drive first via the web dashboard (or provide a public file link).")
         return 0
 
     log("==================================================")

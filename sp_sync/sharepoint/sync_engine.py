@@ -16,6 +16,23 @@ import re
 from pathlib import PurePosixPath
 from datetime import datetime
 
+from sp_sync.sync_metrics import (
+    start_file_progress,
+    update_file_progress,
+    complete_file_progress,
+)
+
+def _is_valid_mp4(file_path: str) -> bool:
+    """Quick validation to check if an MP4 file has a valid container header and size."""
+    try:
+        if not os.path.isfile(file_path) or os.path.getsize(file_path) < 64:
+            return False
+        with open(file_path, "rb") as f:
+            head = f.read(128)
+            return b"ftyp" in head or b"moov" in head
+    except Exception:
+        return False
+
 # Force UTF-8 via env (must be set before other imports that might use stdout)
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -690,6 +707,7 @@ def download_video_via_capture(
 
     # Step 2: Final conversion to MP4 with faststart
     if res_mux.returncode == 0 and os.path.exists(ts_output):
+        part_path = output_path + ".part"
         cmd_final = [
             ff,
             "-y",
@@ -699,14 +717,15 @@ def download_video_via_capture(
             "copy",
             "-movflags",
             "+faststart",
-            output_path,
+            part_path,
         ]
         res_final = subprocess.run(cmd_final, capture_output=True, text=True, timeout=300)
         
         # Cleanup TS
         if os.path.exists(ts_output): os.remove(ts_output)
         
-        if res_final.returncode == 0 and os.path.exists(output_path):
+        if res_final.returncode == 0 and os.path.exists(part_path) and os.path.getsize(part_path) > 1024:
+            os.replace(part_path, output_path)
             size = os.path.getsize(output_path)
             return True, size
 
@@ -1572,20 +1591,25 @@ def _download_one_file(
 
     if os.path.exists(local_path):
         size = os.path.getsize(local_path)
-        if remote_size and remote_size > 0:
-            if size == remote_size:
-                log(f"[-] Skip '{name}' (exists, {size/1024/1024:.1f} MB)")
-                return 0
-        elif not is_video or size > 1024 * 1024:
+        is_corrupt = False
+        if is_video:
+            if not _is_valid_mp4(local_path) or size < 1024 * 1024:
+                is_corrupt = True
+        elif remote_size and remote_size > 0 and size != remote_size:
+            is_corrupt = True
+
+        if not is_corrupt:
             log(f"[-] Skip '{name}' (exists, {size/1024/1024:.1f} MB)")
             return 0
-        log(f"⚠️ Re-downloading '{name}' (suspicious size: {size/1024:.0f} KB)")
+        log(f"⚠️ Re-downloading '{name}' (corrupted or incomplete size: {size/1024:.0f} KB)")
 
     if not allow_non_mp4 and not is_video:
         log(f"[-] Skip '{name}' (not video)")
         return 0
 
     log(f"[+] Downloading '{name}'...")
+    parent_folder_name = os.path.basename(os.path.dirname(local_path))
+    start_file_progress(parent_folder_name, name, remote_size or 0)
 
     # Strategy 1: v2.0/shares API if sharing link is provided
     from sp_sync.sharepoint.rest_folder_list import (
@@ -1612,14 +1636,21 @@ def _download_one_file(
                 if v2_content_url:
                     prev_accept = session.headers.get("Accept")
                     session.headers["Accept"] = "*/*"
+                    part_path = local_path + ".part"
                     try:
                         v2_res = session.get(v2_content_url, stream=True, timeout=60, allow_redirects=True)
                         if v2_res.status_code in (200, 206):
                             ct = (v2_res.headers.get("Content-Type") or "").lower()
                             if "html" not in ct:
-                                with open(local_path, "wb") as f_out:
+                                tot = int(v2_res.headers.get("Content-Length", 0) or remote_size or 0)
+                                dl = 0
+                                with open(part_path, "wb") as f_out:
                                     for chunk in v2_res.iter_content(chunk_size=65536):
                                         f_out.write(chunk)
+                                        dl += len(chunk)
+                                        update_file_progress(dl, tot)
+                                os.replace(part_path, local_path)
+                                complete_file_progress(name)
                                 log(
                                     f"✅ Downloaded '{name}' via shares API ({os.path.getsize(local_path)/1024/1024:.1f} MB)"
                                 )
@@ -1627,6 +1658,11 @@ def _download_one_file(
                     finally:
                         if prev_accept:
                             session.headers["Accept"] = prev_accept
+                        if os.path.exists(part_path):
+                            try:
+                                os.remove(part_path)
+                            except Exception:
+                                pass
         except Exception:
             pass
 
@@ -1645,13 +1681,27 @@ def _download_one_file(
                     cl = int(file_res.headers.get("Content-Length", "0"))
                     use_stream = cl > 1024 * 1024
                 if use_stream:
-                    with open(local_path, "wb") as f_out:
-                        for chunk in file_res.iter_content(chunk_size=65536):
-                            f_out.write(chunk)
-                    log(
-                        f"✅ Downloaded '{name}' via API ({os.path.getsize(local_path)/1024/1024:.1f} MB)"
-                    )
-                    return 1
+                    part_path = local_path + ".part"
+                    tot = int(file_res.headers.get("Content-Length", 0) or remote_size or 0)
+                    dl = 0
+                    try:
+                        with open(part_path, "wb") as f_out:
+                            for chunk in file_res.iter_content(chunk_size=65536):
+                                f_out.write(chunk)
+                                dl += len(chunk)
+                                update_file_progress(dl, tot)
+                        os.replace(part_path, local_path)
+                        complete_file_progress(name)
+                        log(
+                            f"✅ Downloaded '{name}' via API ({os.path.getsize(local_path)/1024/1024:.1f} MB)"
+                        )
+                        return 1
+                    finally:
+                        if os.path.exists(part_path):
+                            try:
+                                os.remove(part_path)
+                            except Exception:
+                                pass
     except Exception:
         pass
 
@@ -1671,6 +1721,7 @@ def _download_one_file(
         page, file_rel_url, local_path, log, sp_site_url=sp_site_url
     )
     if success:
+        complete_file_progress(name)
         log(f"✅ Finished '{name}' ({size/1024/1024:.1f} MB)")
         return 1
     log(f"❌ Failed '{name}'")
@@ -1719,6 +1770,12 @@ def sync_sharepoint_files(
         return 0
 
     os.makedirs(download_dir, exist_ok=True)
+    try:
+        _, _, free = shutil.disk_usage(download_dir)
+        if free < 2 * 1024 * 1024 * 1024:
+            log(f"⚠️ Warning: Low disk space! Only {free / (1024**3):.1f} GB remaining on target drive.")
+    except Exception:
+        pass
 
     session, page = _sharepoint_session_and_page(
         fedauth_cookie, rtfa_cookie, sp_site_url, log
@@ -1845,6 +1902,12 @@ def _sync_folder_recursive(
     from sp_sync.sharepoint.rest_folder_list import list_folder_children_rest
 
     os.makedirs(download_dir, exist_ok=True)
+    try:
+        _, _, free = shutil.disk_usage(download_dir)
+        if free < 2 * 1024 * 1024 * 1024:
+            log(f"⚠️ Warning: Low disk space! Only {free / (1024**3):.1f} GB remaining on target drive.")
+    except Exception:
+        pass
 
     base_site = (sp_site_url or get_sp_site_url()).rstrip("/")
     share_for_list = (sharing_link_url or "").strip()
