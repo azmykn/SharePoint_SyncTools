@@ -718,12 +718,151 @@ def _cleanup_playwright():
         _pw_instance = None
 
 
+def _capture_work_dir(output_path):
+    """Per-output temp directory so interrupted captures can resume independently."""
+    import hashlib
+
+    abs_out = os.path.abspath(output_path)
+    digest = hashlib.sha1(abs_out.encode("utf-8")).hexdigest()[:12]
+    stem = _sanitize_dir_name(os.path.splitext(os.path.basename(output_path))[0])[:48]
+    return os.path.join(TMP_DIR, f"{stem}_{digest}")
+
+
+def _progress_meta_path(work_dir):
+    return os.path.join(work_dir, "capture_progress.json")
+
+
+def _load_capture_progress(work_dir):
+    path = _progress_meta_path(work_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _save_capture_progress(work_dir, meta):
+    os.makedirs(work_dir, exist_ok=True)
+    path = _progress_meta_path(work_dir)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+
+
+def _clear_capture_progress(work_dir):
+    path = _progress_meta_path(work_dir)
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _try_promote_part_file(output_path, log=print):
+    """If ``output_path.part`` is a valid MP4, promote it to ``output_path``."""
+    part_path = output_path + ".part"
+    if not os.path.isfile(part_path):
+        return None
+    if not _is_valid_mp4(part_path) or os.path.getsize(part_path) < 1024:
+        return None
+    probe = _resolve_ffprobe_path()
+    if probe and _ffprobe_duration_seconds(part_path, probe) is None:
+        return None
+    os.replace(part_path, output_path)
+    size = os.path.getsize(output_path)
+    log(f"    ♻️ Resumed incomplete download: promoted .part ({size/1024/1024:.1f} MB)")
+    return size
+
+
+def _flush_capture_buffers(page, v_file, a_file, cursors, log=print):
+    """Append newly captured SourceBuffer chunks to disk; update ``cursors`` in place."""
+    written = {"video": 0, "audio": 0}
+    for track, track_file in (("video", v_file), ("audio", a_file)):
+        try:
+            num = page.evaluate(f"() => window.__capturedBuffers.{track}.length")
+        except Exception as exc:
+            log(f"    ⚠️ Buffer length error ({track}): {exc}")
+            continue
+        start = int(cursors.get(track, 0) or 0)
+        if not num or num <= start:
+            continue
+        batch_size = 50
+        total_bytes = 0
+        os.makedirs(os.path.dirname(track_file) or ".", exist_ok=True)
+        with open(track_file, "ab") as f_out:
+            for start_idx in range(start, num, batch_size):
+                try:
+                    batch = page.evaluate(
+                        "([t, s, e]) => window.__capturedBuffers[t].slice(s, e).map(x => x.b64)",
+                        [track, start_idx, min(start_idx + batch_size, num)],
+                    )
+                    for b64_data in batch:
+                        raw = base64.b64decode(b64_data)
+                        f_out.write(raw)
+                        total_bytes += len(raw)
+                except Exception as e:
+                    log(f"    ⚠️ Buffer extract error near batch {start_idx}: {e}")
+        cursors[track] = num
+        written[track] = total_bytes
+    return written
+
+
+def _try_resume_from_existing_capture(output_path, log=print, ffmpeg_path=None):
+    """Reuse an existing .part or completed capture temps. Returns (ok, size) or None."""
+    promoted = _try_promote_part_file(output_path, log=log)
+    if promoted is not None:
+        return True, promoted
+
+    work_dir = _capture_work_dir(output_path)
+    v_file = os.path.join(work_dir, "video.fmp4")
+    a_file = os.path.join(work_dir, "audio.fmp4")
+    meta = _load_capture_progress(work_dir) or {}
+    if not (os.path.exists(v_file) and os.path.getsize(v_file) >= 100):
+        return None
+    if not meta.get("capture_complete") and not meta.get("force_mux"):
+        # Incomplete capture: caller may continue from last_time.
+        return None
+
+    ff = ffmpeg_path or resolve_ffmpeg_path(log)
+    if not ff or not os.path.isfile(ff):
+        log("    ❌ ffmpeg not available — cannot remux resumed capture")
+        return False, 0
+    log("    ♻️ Resuming: remuxing previously captured tracks (skipping browser capture)...")
+    ok, size = _mux_captured_tracks(ff, v_file, a_file, output_path, log=log, tmp_dir=work_dir)
+    if ok:
+        _clear_capture_progress(work_dir)
+    return ok, size
+
+
 def download_video_via_capture(
     page, file_rel_url, output_path, log=print, sp_site_url=None
 ):
     """Download a video by hooking the browser's SourceBuffer to capture decrypted data.
-    Returns (success, file_size)."""
+    Returns (success, file_size).
+
+    Interrupted runs resume from ``output_path.part`` or per-file capture temps under
+    ``TMP_DIR`` when possible; otherwise capture continues from the last saved time.
+    """
     os.makedirs(TMP_DIR, exist_ok=True)
+    work_dir = _capture_work_dir(output_path)
+    os.makedirs(work_dir, exist_ok=True)
+    v_file = os.path.join(work_dir, "video.fmp4")
+    a_file = os.path.join(work_dir, "audio.fmp4")
+
+    resumed = _try_resume_from_existing_capture(output_path, log=log)
+    if resumed is not None:
+        return resumed
+
+    meta = _load_capture_progress(work_dir) or {}
+    resume_from = float(meta.get("last_time") or 0)
+    reuse_temps = (
+        resume_from > 5
+        and os.path.exists(v_file)
+        and os.path.getsize(v_file) >= 100
+        and not meta.get("capture_complete")
+    )
 
     base = (sp_site_url or get_sp_site_url()).rstrip("/")
     file_viewer_url = (
@@ -783,50 +922,93 @@ def download_video_via_capture(
         log("    ❌ Video player not found after several tries")
         return False, 0
 
-    # Proceed with fast playback with enhanced logging
-    log(f"    ⏱️ Duration: {dur:.0f}s ({dur/60:.1f} min). Capturing at 16x...")
+    cursors = {"video": 0, "audio": 0}
+    if reuse_temps:
+        log(
+            f"    ♻️ Resuming capture from ~{resume_from:.0f}s "
+            f"(reusing {os.path.getsize(v_file)/1024/1024:.1f} MB video temp)"
+        )
+        seek_to = min(resume_from, max(0, dur - 1))
+        page.evaluate(
+            """(t) => {
+                const v = document.querySelector('video');
+                if (!v) return;
+                v.currentTime = t;
+                v.playbackRate = 16.0;
+                v.muted = true;
+                v.play();
+            }""",
+            seek_to,
+        )
+        last_time = seek_to
+    else:
+        # Fresh capture — drop stale temps for this output.
+        for f in (v_file, a_file):
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        _clear_capture_progress(work_dir)
+        resume_from = 0
+        log(f"    ⏱️ Duration: {dur:.0f}s ({dur/60:.1f} min). Capturing at 16x...")
+        page.evaluate(
+            "() => { const v = document.querySelector('video'); if(v) { v.playbackRate = 16.0; v.muted = true; v.play(); } }"
+        )
+        last_time = 0
 
-    # Play video at 16x speed to sequentially capture all segments without skipping
-    page.evaluate("() => { const v = document.querySelector('video'); if(v) { v.playbackRate = 16.0; v.muted = true; v.play(); } }")
-    
-    last_time = 0
     stuck_count = 0
     start_time = time.time()
     last_log_time = start_time
-    
+    last_flush_time = start_time
+
     while True:
         time.sleep(2)
         state = page.evaluate("""() => { 
             const v = document.querySelector('video'); 
             return v ? { time: v.currentTime, ended: v.ended, paused: v.paused } : { time: 0, ended: true, paused: true }; 
         }""")
-        
-        # Enhanced progress logging every 10 seconds
-        current_time = time.time()
-        if current_time - last_log_time >= 10:
+
+        now = time.time()
+        if now - last_log_time >= 10:
             progress_percent = (state['time'] / dur) * 100 if dur > 0 else 0
-            elapsed = current_time - start_time
+            elapsed = now - start_time
             buffer_counts = page.evaluate("() => ({ v: window.__capturedBuffers.video.length, a: window.__capturedBuffers.audio.length })")
-            
             log(f"    📊 Progress: {progress_percent:.1f}% | time: {state['time']:.0f}/{dur:.0f}s | buffers V={buffer_counts['v']} A={buffer_counts['a']} | elapsed: {elapsed:.0f}s")
-            last_log_time = current_time
-        
+            last_log_time = now
+
         current_time = state['time']
-        
+
+        # Periodically flush buffers so a crash mid-lecture keeps reusable parts.
+        if now - last_flush_time >= 30 or state['ended']:
+            _flush_capture_buffers(page, v_file, a_file, cursors, log=log)
+            _save_capture_progress(
+                work_dir,
+                {
+                    "output_path": os.path.abspath(output_path),
+                    "last_time": float(current_time or last_time or 0),
+                    "duration": float(dur or 0),
+                    "capture_complete": bool(state['ended']),
+                    "video_bytes": os.path.getsize(v_file) if os.path.exists(v_file) else 0,
+                    "audio_bytes": os.path.getsize(a_file) if os.path.exists(a_file) else 0,
+                },
+            )
+            last_flush_time = now
+
         if state['ended']:
             break
-            
+
         if current_time == last_time:
             stuck_count += 1
-            if stuck_count > 15: # 30 seconds stuck
+            if stuck_count > 15:  # 30 seconds stuck
                 log("    ⚠️ Playback looks stuck; trying to recover...")
                 page.evaluate("() => { const v = document.querySelector('video'); if(v) v.play(); }")
                 stuck_count = 0
         else:
             stuck_count = 0
-            
+
         last_time = current_time
-        
+
         if int(current_time) % 60 == 0 or stuck_count == 1:
             c = page.evaluate("() => ({ v: window.__capturedBuffers.video.length, a: window.__capturedBuffers.audio.length })")
             log(f"    📥 Progress: {current_time:.0f}s / {dur:.0f}s (V={c['v']} A={c['a']})")
@@ -834,43 +1016,29 @@ def download_video_via_capture(
     final = page.evaluate("() => ({ v: window.__capturedBuffers.video.length, a: window.__capturedBuffers.audio.length })")
     log(f"    📦 Totals: V={final['v']} A={final['a']} buffers")
 
-    # Extract captured data to temp files
-    v_file = os.path.join(TMP_DIR, "video.fmp4")
-    a_file = os.path.join(TMP_DIR, "audio.fmp4")
-    
-    # Remove old temp files
-    for f in [v_file, a_file]:
-        if os.path.exists(f):
-            try: os.remove(f)
-            except: pass
+    # Final flush of any remaining chunks.
+    _flush_capture_buffers(page, v_file, a_file, cursors, log=log)
+    _save_capture_progress(
+        work_dir,
+        {
+            "output_path": os.path.abspath(output_path),
+            "last_time": float(dur or last_time or 0),
+            "duration": float(dur or 0),
+            "capture_complete": True,
+            "video_bytes": os.path.getsize(v_file) if os.path.exists(v_file) else 0,
+            "audio_bytes": os.path.getsize(a_file) if os.path.exists(a_file) else 0,
+        },
+    )
 
-    for track, track_file in [('video', v_file), ('audio', a_file)]:
-        num = page.evaluate(f"() => window.__capturedBuffers.{track}.length")
-        if num == 0:
+    for track, track_file in (("video", v_file), ("audio", a_file)):
+        if os.path.exists(track_file):
+            log(f"    💾 {track}: {os.path.getsize(track_file)/1024/1024:.1f} MB")
+        else:
             log(f"    ⚠️ No captured data for track: {track}")
-            continue
-
-        total_bytes = 0
-        batch_size = 50
-        with open(track_file, 'wb') as f_out:
-            for start_idx in range(0, num, batch_size):
-                try:
-                    batch = page.evaluate(
-                        "([t, s, e]) => window.__capturedBuffers[t].slice(s, e).map(x => x.b64)",
-                        [track, start_idx, min(start_idx + batch_size, num)],
-                    )
-                    for b64_data in batch:
-                        raw = base64.b64decode(b64_data)
-                        f_out.write(raw)
-                        total_bytes += len(raw)
-                except Exception as e:
-                    log(f"    ⚠️ Buffer extract error near batch {start_idx}: {e}")
-        log(f"    💾 {track}: {total_bytes/1024/1024:.1f} MB")
 
     # Reset captured buffers for next file
     page.evaluate("() => { window.__capturedBuffers = { video: [], audio: [] }; }")
 
-    # Muxing Logic: Switch to MPEG-TS as intermediate for robustness
     if not os.path.exists(v_file) or os.path.getsize(v_file) < 100:
         log("    ❌ Video path empty or invalid")
         return False, 0
@@ -882,7 +1050,10 @@ def download_video_via_capture(
         log("    ❌ ffmpeg not available — install ffmpeg or set FFMPEG_PATH")
         return False, 0
 
-    return _mux_captured_tracks(ff, v_file, a_file, output_path, log=log, tmp_dir=TMP_DIR)
+    ok, size = _mux_captured_tracks(ff, v_file, a_file, output_path, log=log, tmp_dir=work_dir)
+    if ok:
+        _clear_capture_progress(work_dir)
+    return ok, size
 
 
 
@@ -1746,6 +1917,12 @@ def _download_one_file(
             log(f"[-] Skip '{name}' (exists, {size/1024/1024:.1f} MB)")
             return 0
         log(f"⚠️ Re-downloading '{name}' (corrupted or incomplete size: {size/1024:.0f} KB)")
+    else:
+        # Interrupted previous run left a valid .part — promote instead of starting over.
+        promoted = _try_promote_part_file(local_path, log=log)
+        if promoted is not None:
+            complete_file_progress(name)
+            return 1
 
     if not allow_non_mp4 and not is_video:
         log(f"[-] Skip '{name}' (not video)")
