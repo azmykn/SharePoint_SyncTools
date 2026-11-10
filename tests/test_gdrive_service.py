@@ -44,9 +44,18 @@ class TestGDriveService(unittest.TestCase):
         self.assertIsNone(extract_folder_id("short"))
 
     def test_has_credentials(self):
+        import os
+        import tempfile
         from sp_sync.gdrive.service import has_credentials
-        # credentials.json exists in root
-        self.assertTrue(has_credentials())
+
+        self.assertFalse(has_credentials(credentials_file=os.path.join(tempfile.gettempdir(), "no_such_creds.json")))
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write('{"installed": {"client_id": "x"}}')
+            path = f.name
+        try:
+            self.assertTrue(has_credentials(credentials_file=path))
+        finally:
+            os.unlink(path)
 
     def test_oauth_status_structure(self):
         from sp_sync.gdrive.service import get_oauth_status
@@ -54,7 +63,7 @@ class TestGDriveService(unittest.TestCase):
         self.assertIn("authenticated", st)
         self.assertIn("flow_status", st)
         self.assertIn("has_credentials", st)
-        self.assertTrue(st["has_credentials"])
+        self.assertIsInstance(st["has_credentials"], bool)
 
     def test_google_docs_export_mappings(self):
         self.assertIn("application/vnd.google-apps.document", GOOGLE_DOCS_EXPORT)
