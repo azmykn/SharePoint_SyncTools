@@ -14,6 +14,9 @@ DEFAULTS: dict[str, Any] = {
     "database_path": "data/app.sqlite",
     # Optional default guest/share link used before REST (Playwright seed)
     "default_guest_share_link": "",
+    # Post-download duration check: fail when |actual-expected| > max(abs, pct*expected)
+    "duration_tolerance_pct": 0.02,
+    "duration_tolerance_seconds": 30.0,
 }
 
 
@@ -28,7 +31,7 @@ def load_settings() -> dict[str, Any]:
                 data = json.load(f)
             if isinstance(data, dict):
                 for k, v in data.items():
-                    if k in DEFAULTS or k in ("database_path", "default_guest_share_link"):
+                    if k in DEFAULTS:
                         merged[k] = v
         except (OSError, json.JSONDecodeError):
             pass
@@ -60,3 +63,17 @@ def database_file_path() -> str:
 
 def default_guest_share_link() -> str:
     return (load_settings().get("default_guest_share_link") or "").strip()
+
+
+def duration_tolerance() -> tuple[float, float]:
+    """Return ``(pct, abs_seconds)`` for post-download duration verification."""
+    s = load_settings()
+    try:
+        pct = float(s.get("duration_tolerance_pct", 0.02))
+    except (TypeError, ValueError):
+        pct = 0.02
+    try:
+        abs_sec = float(s.get("duration_tolerance_seconds", 30.0))
+    except (TypeError, ValueError):
+        abs_sec = 30.0
+    return max(0.0, pct), max(0.0, abs_sec)

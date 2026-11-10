@@ -91,6 +91,56 @@ def _ffmpeg_stderr_tail(text, max_lines=8):
     return "\n".join(lines[-max_lines:])
 
 
+def _duration_outside_tolerance(actual, expected, pct=None, abs_sec=None):
+    """True when |actual-expected| exceeds ``max(abs_sec, pct*expected)``."""
+    if actual is None or expected is None:
+        return False
+    try:
+        actual_f = float(actual)
+        expected_f = float(expected)
+    except (TypeError, ValueError):
+        return False
+    if actual_f <= 0 or expected_f <= 0:
+        return False
+    if pct is None or abs_sec is None:
+        pct, abs_sec = duration_tolerance()
+    diff = abs(actual_f - expected_f)
+    allowed = max(float(abs_sec), float(expected_f) * float(pct))
+    return diff > allowed
+
+
+def _verify_output_duration(file_path, expected_duration, log=print, ffmpeg_path=None):
+    """ffprobe the file and compare to expected. Returns (ok, actual_duration).
+
+    On mismatch the file is treated as failed (caller should delete / re-download).
+    When ``expected_duration`` is missing, verification is skipped (ok=True).
+    """
+    if expected_duration is None:
+        return True, None
+    try:
+        expected_f = float(expected_duration)
+    except (TypeError, ValueError):
+        return True, None
+    if expected_f <= 0:
+        return True, None
+
+    probe = _resolve_ffprobe_path(ffmpeg_path)
+    actual = _ffprobe_duration_seconds(file_path, probe) if probe else None
+    if actual is None:
+        log("    ❌ Duration verification failed: ffprobe could not read output")
+        return False, None
+    if _duration_outside_tolerance(actual, expected_f):
+        pct, abs_sec = duration_tolerance()
+        allowed = max(abs_sec, expected_f * pct)
+        log(
+            f"    ❌ Duration mismatch: got {actual:.1f}s, expected {expected_f:.1f}s "
+            f"(tolerance ±{allowed:.1f}s)"
+        )
+        return False, actual
+    log(f"    ✅ Duration verified: {actual:.1f}s (expected {expected_f:.1f}s)")
+    return True, actual
+
+
 def _ts_to_mp4_part_cmd(ffmpeg_path, ts_output, part_path):
     """Remux MPEG-TS into a *.mp4.part file. -f mp4 is required: ffmpeg cannot guess the muxer from a .part extension."""
     return [
@@ -281,7 +331,8 @@ def _find_system_chromium_executable():
 
 
 from sp_sync.paths import project_root
-from sp_sync.config.settings import default_guest_share_link
+from sp_sync.config.settings import default_guest_share_link, duration_tolerance
+
 
 
 def get_sp_site_url() -> str:
@@ -831,9 +882,28 @@ def _try_resume_from_existing_capture(output_path, log=print, ffmpeg_path=None):
         return False, 0
     log("    ♻️ Resuming: remuxing previously captured tracks (skipping browser capture)...")
     ok, size = _mux_captured_tracks(ff, v_file, a_file, output_path, log=log, tmp_dir=work_dir)
-    if ok:
+    if not ok:
+        return False, 0
+    expected = meta.get("duration")
+    verified, _actual = _verify_output_duration(
+        output_path, expected, log=log, ffmpeg_path=ff
+    )
+    if not verified:
+        log("    ⚠️ Resumed mux failed duration check; discarding output for re-download")
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
         _clear_capture_progress(work_dir)
-    return ok, size
+        for tmp in (v_file, a_file):
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        return False, 0
+    _clear_capture_progress(work_dir)
+    return True, size
 
 
 def download_video_via_capture(
@@ -1051,10 +1121,29 @@ def download_video_via_capture(
         return False, 0
 
     ok, size = _mux_captured_tracks(ff, v_file, a_file, output_path, log=log, tmp_dir=work_dir)
-    if ok:
-        _clear_capture_progress(work_dir)
-    return ok, size
+    if not ok:
+        return False, 0
 
+    verified, _actual = _verify_output_duration(
+        output_path, dur, log=log, ffmpeg_path=ff
+    )
+    if not verified:
+        log("    ⚠️ Marking download failed due to duration mismatch; will re-download")
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        _clear_capture_progress(work_dir)
+        for tmp in (v_file, a_file):
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+        return False, 0
+
+    _clear_capture_progress(work_dir)
+    return True, size
 
 
 def _sp_url_leaf_segment(server_rel_url):
@@ -2041,6 +2130,12 @@ def _download_one_file(
     success, size = download_video_via_capture(
         page, file_rel_url, local_path, log, sp_site_url=sp_site_url
     )
+    if not success:
+        # One automatic re-download after duration/mux failure.
+        log(f"    🔁 Retrying browser capture for '{name}' once...")
+        success, size = download_video_via_capture(
+            page, file_rel_url, local_path, log, sp_site_url=sp_site_url
+        )
     if success:
         complete_file_progress(name)
         log(f"✅ Finished '{name}' ({size/1024/1024:.1f} MB)")
