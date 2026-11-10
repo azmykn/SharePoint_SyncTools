@@ -31,6 +31,20 @@ _last_sample_bytes = 0
 _last_sample_time = 0.0
 
 
+
+def _to_num(value: Any) -> float:
+    """Coerce a byte/speed value (int, float, numeric str, None) to a number; 0 if invalid."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return value
+    try:
+        num = float(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+    return int(num) if num.is_integer() else num
+
+
 def set_sync_active(active: bool, service: str = "", queue_total: int = 0) -> None:
     """Mark sync as active or inactive and reset state."""
     global _last_sample_bytes, _last_sample_time
@@ -59,7 +73,7 @@ def start_file_progress(folder_name: str, file_name: str, total_bytes: int = 0) 
     with _lock:
         _state["current_folder"] = folder_name
         _state["current_file"] = file_name
-        _state["total_bytes"] = total_bytes
+        _state["total_bytes"] = _to_num(total_bytes)
         _state["downloaded_bytes"] = 0
         _state["file_progress_pct"] = 0
         _state["speed_bps"] = 0
@@ -73,6 +87,9 @@ def start_file_progress(folder_name: str, file_name: str, total_bytes: int = 0) 
 def update_file_progress(downloaded_bytes: int, total_bytes: Optional[int] = None) -> None:
     """Update byte counts and compute download speed and ETA."""
     global _last_sample_bytes, _last_sample_time
+    downloaded_bytes = _to_num(downloaded_bytes)
+    if total_bytes is not None:
+        total_bytes = _to_num(total_bytes)
     now = time.time()
     with _lock:
         if total_bytes is not None and total_bytes > 0:
@@ -123,6 +140,8 @@ def get_live_metrics() -> Dict[str, Any]:
     """Return a snapshot of current live metrics formatted for JSON response."""
     with _lock:
         s = dict(_state)
+    for key in ("speed_bps", "downloaded_bytes", "total_bytes"):
+        s[key] = _to_num(s.get(key))
 
     # Format human-readable strings
     speed_mbps = round(s["speed_bps"] / (1024 * 1024), 2) if s["speed_bps"] > 0 else 0.0
