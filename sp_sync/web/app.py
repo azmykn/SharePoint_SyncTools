@@ -39,6 +39,9 @@ from sp_sync.scheduler import (
     is_run_due,
     is_scheduler_daemon_alive,
     run_scheduler_now,
+    get_scheduler_summary,
+    save_scheduler_summary,
+    build_download_summary_line,
 )
 
 ROOT = project_root()
@@ -1581,12 +1584,18 @@ def scheduler_settings_route():
             return _json_error(str(exc), 500, code='SCHEDULER_SETTINGS_SAVE_FAILED')
 
         state_str = "enabled" if updated.get("enabled") else "disabled"
-        add_log('system', f"⏰ Scheduler {state_str}: every {updated.get('interval_hours')} hours (target={updated.get('target')})")
+        mode = updated.get("schedule_mode") or "daily"
+        if mode == "daily":
+            when = f"daily at {updated.get('daily_time')}"
+        else:
+            when = f"every {updated.get('interval_hours')} hours"
+        add_log('system', f"⏰ Scheduler {state_str}: {when} (target={updated.get('target')})")
         return jsonify({
             'success': True,
             'settings': updated,
             'is_due': is_run_due(),
             'daemon_alive': is_scheduler_daemon_alive(),
+            'summary': get_scheduler_summary(),
         })
 
     current = get_scheduler_settings()
@@ -1595,6 +1604,17 @@ def scheduler_settings_route():
         'settings': current,
         'is_due': is_run_due(),
         'daemon_alive': is_scheduler_daemon_alive(),
+        'summary': get_scheduler_summary(),
+    })
+
+
+@app.route('/scheduler/summary')
+def scheduler_summary_route():
+    """Last scheduled-run summary of newly downloaded lectures."""
+    return jsonify({
+        'success': True,
+        'summary': get_scheduler_summary(),
+        'settings': get_scheduler_settings(),
     })
 
 
@@ -1645,10 +1665,41 @@ def api_open_local_folder():
         return jsonify({'success': False, 'error': str(exc)}), 500
 
 
+def _extract_downloaded_name_from_log(msg: str) -> str | None:
+    """Pull a lecture/file name out of success log lines."""
+    text = (msg or "").strip()
+    if not text.startswith("✅"):
+        return None
+    if "Finished '" in text or "Downloaded '" in text or "Downloaded \"" in text:
+        m = re.search(r"['\"]([^'\"]+)['\"]", text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _publish_scheduler_summary(target: str, new_files: list, downloaded_files: int, errors: list) -> None:
+    summary = {
+        "target": target,
+        "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "downloaded_files": int(downloaded_files or 0),
+        "new_files": list(new_files or [])[:200],
+        "errors": list(errors or [])[:20],
+    }
+    save_scheduler_summary(summary)
+    line = build_download_summary_line(summary)
+    add_log("system", f"📋 {line}")
+
+
 def _trigger_scheduled_sync(target="all"):
     """Callback invoked by background scheduler daemon when an automatic run is due."""
     try:
         add_log('system', f"⏰ Scheduled auto-sync starting (target={target})...")
+        summary_files: list[str] = []
+        summary_errors: list[str] = []
+        summary_total = {"n": 0}
+        summary_lock = threading.Lock()
+        pending_threads: list[threading.Thread] = []
+
         if target in ("all", "sharepoint") and not sync_status['sharepoint']['running']:
             fedauth, rtfa = load_sp_cookies()
             if fedauth and sp_site():
@@ -1663,6 +1714,14 @@ def _trigger_scheduled_sync(target="all"):
                     processed = 0
                     failed = 0
                     skipped = 0
+                    sp_files: list[str] = []
+
+                    def _sp_log(m):
+                        add_log('sharepoint', m)
+                        name = _extract_downloaded_name_from_log(m)
+                        if name:
+                            sp_files.append(name)
+
                     try:
                         from sp_sync.sharepoint.sync_engine import start_sync_from_config
                         for c in sp_configs:
@@ -1671,7 +1730,7 @@ def _trigger_scheduled_sync(target="all"):
                                 continue
                             processed += 1
                             try:
-                                total += int(start_sync_from_config(fedauth, rtfa, sp_site(), c, log_callback=lambda m: add_log('sharepoint', m)) or 0)
+                                total += int(start_sync_from_config(fedauth, rtfa, sp_site(), c, log_callback=_sp_log) or 0)
                             except Exception as cfg_exc:
                                 failed += 1
                                 errors.append(str(cfg_exc))
@@ -1690,6 +1749,7 @@ def _trigger_scheduled_sync(target="all"):
                             'finished_at': finished_at,
                             'elapsed_sec': round(time.time() - started_ts, 3),
                             'downloaded_files': total,
+                            'new_files': sp_files[:200],
                             'configs_total': len(sp_configs),
                             'configs_processed': processed,
                             'configs_failed': failed,
@@ -1697,7 +1757,13 @@ def _trigger_scheduled_sync(target="all"):
                             'errors': errors[:20],
                             'message': sync_status['sharepoint'].get('last_result', ''),
                         })
-                threading.Thread(target=_do_sp, daemon=True).start()
+                        with summary_lock:
+                            summary_files.extend(sp_files)
+                            summary_errors.extend(errors)
+                            summary_total["n"] += total
+                t_sp = threading.Thread(target=_do_sp, daemon=True)
+                pending_threads.append(t_sp)
+                t_sp.start()
 
         if target in ("all", "gdrive") and not sync_status['gdrive']['running']:
             from sp_sync.gdrive import is_authenticated
@@ -1713,12 +1779,20 @@ def _trigger_scheduled_sync(target="all"):
                         errors = []
                         processed = 0
                         failed = 0
+                        gd_files: list[str] = []
+
+                        def _gd_log(m):
+                            add_log('gdrive', m)
+                            name = _extract_downloaded_name_from_log(m)
+                            if name:
+                                gd_files.append(name)
+
                         try:
                             from sp_sync.gdrive import start_gdrive_sync
                             for c in gd_configs:
                                 processed += 1
                                 try:
-                                    total += int(start_gdrive_sync(c['folder_url'], c['local_path'], log_callback=lambda m: add_log('gdrive', m)) or 0)
+                                    total += int(start_gdrive_sync(c['folder_url'], c['local_path'], log_callback=_gd_log) or 0)
                                 except Exception as cfg_exc:
                                     failed += 1
                                     errors.append(str(cfg_exc))
@@ -1737,6 +1811,7 @@ def _trigger_scheduled_sync(target="all"):
                                 'finished_at': finished_at,
                                 'elapsed_sec': round(time.time() - started_ts, 3),
                                 'downloaded_files': total,
+                                'new_files': gd_files[:200],
                                 'configs_total': len(gd_configs),
                                 'configs_processed': processed,
                                 'configs_failed': failed,
@@ -1744,7 +1819,27 @@ def _trigger_scheduled_sync(target="all"):
                                 'errors': errors[:20],
                                 'message': sync_status['gdrive'].get('last_result', ''),
                             })
-                    threading.Thread(target=_do_gd, daemon=True).start()
+                            with summary_lock:
+                                summary_files.extend(gd_files)
+                                summary_errors.extend(errors)
+                                summary_total["n"] += total
+                    t_gd = threading.Thread(target=_do_gd, daemon=True)
+                    pending_threads.append(t_gd)
+                    t_gd.start()
+
+        def _finalize_summary():
+            for t in pending_threads:
+                t.join(timeout=3600 * 6)
+            with summary_lock:
+                files_copy = list(summary_files)
+                errors_copy = list(summary_errors)
+                total_copy = int(summary_total["n"])
+            _publish_scheduler_summary(target, files_copy, total_copy, errors_copy)
+
+        if pending_threads:
+            threading.Thread(target=_finalize_summary, daemon=True).start()
+        else:
+            _publish_scheduler_summary(target, [], 0, [])
     except Exception as exc:
         add_log('system', f"❌ Scheduled sync error: {exc}")
 

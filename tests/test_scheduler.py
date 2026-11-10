@@ -53,6 +53,8 @@ class TestScheduler(unittest.TestCase):
     def test_default_settings(self):
         settings = self.get_scheduler_settings()
         self.assertFalse(settings["enabled"])
+        self.assertEqual(settings["schedule_mode"], "daily")
+        self.assertEqual(settings["daily_time"], "02:00")
         self.assertEqual(settings["interval_hours"], 6)
         self.assertEqual(settings["target"], "all")
         self.assertIsNone(settings["last_run"])
@@ -61,10 +63,12 @@ class TestScheduler(unittest.TestCase):
     def test_save_and_retrieve_settings(self):
         updated = self.save_scheduler_settings({
             "enabled": True,
+            "schedule_mode": "interval",
             "interval_hours": 12,
             "target": "sharepoint"
         })
         self.assertTrue(updated["enabled"])
+        self.assertEqual(updated["schedule_mode"], "interval")
         self.assertEqual(updated["interval_hours"], 12)
         self.assertEqual(updated["target"], "sharepoint")
         self.assertIsNotNone(updated["next_run"])
@@ -74,23 +78,78 @@ class TestScheduler(unittest.TestCase):
         self.assertEqual(fetched["interval_hours"], 12)
         self.assertEqual(fetched["target"], "sharepoint")
 
+    def test_daily_settings_and_due(self):
+        updated = self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "daily",
+            "daily_time": "03:30",
+            "target": "all",
+            "last_run": None,
+        })
+        self.assertEqual(updated["daily_time"], "03:30")
+        self.assertIsNotNone(updated["next_run"])
+
+        # Force past today's slot without a last_run → due
+        early = (datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)).strftime("%Y-%m-%d %H:%M:%S")
+        self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "daily",
+            "daily_time": "00:00",
+            "last_run": None,
+        })
+        self.assertTrue(self.is_run_due())
+
+        # Already ran after today's midnight slot → not due
+        self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "daily",
+            "daily_time": "00:00",
+            "last_run": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+        self.assertFalse(self.is_run_due())
+
+        # Future daily_time today → not due yet
+        future_hhmm = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+        self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "daily",
+            "daily_time": future_hhmm,
+            "last_run": early,
+        })
+        self.assertFalse(self.is_run_due())
+
     def test_is_run_due_logic(self):
         # 1. Disabled -> never due
         self.save_scheduler_settings({"enabled": False})
         self.assertFalse(self.is_run_due())
 
-        # 2. Enabled and never run -> is due
-        self.save_scheduler_settings({"enabled": True, "interval_hours": 6, "last_run": None})
+        # 2. Interval mode: enabled and never run -> is due
+        self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "interval",
+            "interval_hours": 6,
+            "last_run": None,
+        })
         self.assertTrue(self.is_run_due())
 
         # 3. Enabled and run recently (1 hour ago, interval 6 hours) -> not due
         recent = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-        self.save_scheduler_settings({"enabled": True, "interval_hours": 6, "last_run": recent})
+        self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "interval",
+            "interval_hours": 6,
+            "last_run": recent,
+        })
         self.assertFalse(self.is_run_due())
 
         # 4. Enabled and run 7 hours ago (interval 6 hours) -> is due
         past = (datetime.now() - timedelta(hours=7)).strftime("%Y-%m-%d %H:%M:%S")
-        self.save_scheduler_settings({"enabled": True, "interval_hours": 6, "last_run": past})
+        self.save_scheduler_settings({
+            "enabled": True,
+            "schedule_mode": "interval",
+            "interval_hours": 6,
+            "last_run": past,
+        })
         self.assertTrue(self.is_run_due())
 
         # 5. Mark run completed updates last_run and next_run
@@ -98,6 +157,24 @@ class TestScheduler(unittest.TestCase):
         after_run = self.get_scheduler_settings()
         self.assertIsNotNone(after_run["last_run"])
         self.assertFalse(self.is_run_due())
+
+    def test_scheduler_summary_helpers(self):
+        from sp_sync.scheduler.runner import (
+            save_scheduler_summary,
+            get_scheduler_summary,
+            build_download_summary_line,
+        )
+        payload = {
+            "downloaded_files": 2,
+            "new_files": ["MBA-09_2026-11-07_1649.mp4", "MBA-09_2026-11-08_1000.mp4"],
+            "target": "sharepoint",
+        }
+        save_scheduler_summary(payload)
+        got = get_scheduler_summary()
+        self.assertEqual(got["downloaded_files"], 2)
+        line = build_download_summary_line(got)
+        self.assertIn("2 new lecture", line)
+        self.assertIn("MBA-09_2026-11-07_1649.mp4", line)
 
     def test_scheduler_validation_rejects_invalid_values(self):
         with self.assertRaises(ValueError):
@@ -111,6 +188,12 @@ class TestScheduler(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self.save_scheduler_settings({"last_run": "2026-99-99"})
+
+        with self.assertRaises(ValueError):
+            self.save_scheduler_settings({"schedule_mode": "weekly"})
+
+        with self.assertRaises(ValueError):
+            self.save_scheduler_settings({"daily_time": "25:99"})
 
     def test_scheduler_daemon_lifecycle(self):
         triggered = []

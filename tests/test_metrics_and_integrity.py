@@ -182,6 +182,7 @@ class TestEnhancementRoutes(unittest.TestCase):
         # POST settings (valid)
         res_post = self.client.post("/scheduler/settings", json={
             "enabled": True,
+            "schedule_mode": "interval",
             "interval_hours": 4,
             "target": "gdrive"
         })
@@ -190,9 +191,25 @@ class TestEnhancementRoutes(unittest.TestCase):
         self.assertTrue(post_data["success"])
         self.assertIn("is_due", post_data)
         self.assertIn("daemon_alive", post_data)
+        self.assertIn("summary", post_data)
         self.assertTrue(post_data["settings"]["enabled"])
         self.assertEqual(post_data["settings"]["interval_hours"], 4)
         self.assertEqual(post_data["settings"]["target"], "gdrive")
+
+        res_daily = self.client.post("/scheduler/settings", json={
+            "enabled": True,
+            "schedule_mode": "daily",
+            "daily_time": "02:15",
+            "target": "sharepoint",
+        })
+        self.assertEqual(res_daily.status_code, 200)
+        daily_data = res_daily.get_json()
+        self.assertEqual(daily_data["settings"]["schedule_mode"], "daily")
+        self.assertEqual(daily_data["settings"]["daily_time"], "02:15")
+
+        res_summary = self.client.get("/scheduler/summary")
+        self.assertEqual(res_summary.status_code, 200)
+        self.assertTrue(res_summary.get_json()["success"])
 
         # POST settings (invalid)
         res_bad = self.client.post("/scheduler/settings", json={
