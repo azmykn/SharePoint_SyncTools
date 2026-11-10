@@ -132,11 +132,10 @@ def _log_final_mux_failure(res_final, res_mux, log=print):
     return rc
 
 
-def _mux_captured_tracks(ff, v_file, a_file, output_path, log=print, tmp_dir=None):
-    """Mux captured fMP4 video/audio tracks into ``output_path``.
+def _attempt_mux_captured_tracks(ff, v_file, a_file, output_path, log=print, tmp_dir=None):
+    """Single mux attempt. Never deletes ``v_file``/``a_file`` on failure.
 
-    Returns ``(ok, size_bytes)``. On failure keeps temp inputs and logs the
-    *final* remux returncode/stderr (not step-1 ``res_mux``).
+    Returns ``(ok, size_bytes, res_final, res_mux, ts_output, part_path)``.
     """
     work_dir = tmp_dir or os.path.dirname(v_file) or TMP_DIR
     os.makedirs(work_dir, exist_ok=True)
@@ -198,6 +197,7 @@ def _mux_captured_tracks(ff, v_file, a_file, output_path, log=print, tmp_dir=Non
         if ok:
             os.replace(part_path, output_path)
             size = os.path.getsize(output_path)
+            # Only delete capture temps after a verified success.
             for tmp in (v_file, a_file, ts_output):
                 if os.path.exists(tmp):
                     try:
@@ -206,12 +206,37 @@ def _mux_captured_tracks(ff, v_file, a_file, output_path, log=print, tmp_dir=Non
                         pass
             if duration is not None:
                 log(f"    ✅ Muxed MP4 duration: {duration:.1f}s")
+            return True, size, res_final, res_mux, ts_output, part_path
+
+    return False, 0, res_final, res_mux, ts_output, part_path
+
+
+def _mux_captured_tracks(ff, v_file, a_file, output_path, log=print, tmp_dir=None):
+    """Mux captured fMP4 video/audio tracks into ``output_path``.
+
+    Returns ``(ok, size_bytes)``. On failure keeps ``v_file``/``a_file``, retries
+    the mux once, and if still failing leaves them for recovery with paths logged.
+    """
+    ok, size, res_final, res_mux, ts_output, part_path = _attempt_mux_captured_tracks(
+        ff, v_file, a_file, output_path, log=log, tmp_dir=tmp_dir
+    )
+    if ok:
+        return True, size
+
+    # Keep capture inputs; retry the full mux once before giving up.
+    if os.path.exists(v_file) and os.path.getsize(v_file) >= 100:
+        log("    🔁 Mux failed — keeping capture temps and retrying mux once...")
+        ok, size, res_final, res_mux, ts_output, part_path = _attempt_mux_captured_tracks(
+            ff, v_file, a_file, output_path, log=log, tmp_dir=tmp_dir
+        )
+        if ok:
+            log("    ✅ Mux succeeded on retry")
             return True, size
 
     _log_final_mux_failure(res_final, res_mux, log=log)
     kept = [p for p in (v_file, a_file, ts_output, part_path) if os.path.exists(p)]
     if kept:
-        log("    📁 Kept temp files for debugging: " + ", ".join(kept))
+        log("    📁 Kept temp files for recovery: " + ", ".join(kept))
     else:
         log("    📁 No temp files remained to keep")
     return False, 0

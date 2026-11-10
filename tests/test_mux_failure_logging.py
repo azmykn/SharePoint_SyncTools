@@ -83,9 +83,91 @@ class TestMuxFailureLogging(unittest.TestCase):
             self.assertFalse(any("exit 0" in m for m in logs), logs)
             self.assertTrue(any("res_final stderr" in m for m in logs), logs)
             self.assertTrue(any("bogus final remux" in m for m in logs), logs)
-            # Temps kept for recovery (also required by later retry work).
+            self.assertTrue(any("retrying mux once" in m.lower() for m in logs), logs)
+            # Temps kept for recovery after both attempts fail.
             self.assertTrue(os.path.exists(v_file))
             self.assertTrue(os.path.exists(a_file))
+            self.assertTrue(any("Kept temp files for recovery" in m for m in logs), logs)
+
+
+class TestMuxRetryKeepsTemps(unittest.TestCase):
+    def test_mux_retries_once_and_succeeds(self):
+        logs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            v_file = os.path.join(tmp, "video.fmp4")
+            a_file = os.path.join(tmp, "audio.fmp4")
+            out = os.path.join(tmp, "lecture.mp4")
+            with open(v_file, "wb") as f:
+                f.write(b"\x00" * 200)
+            with open(a_file, "wb") as f:
+                f.write(b"\x00" * 200)
+
+            state = {"final_calls": 0}
+
+            def fake_run(cmd, capture_output=True, text=True, timeout=300):
+                if "-f" in cmd and cmd[cmd.index("-f") + 1] == "mpegts":
+                    ts_path = cmd[-1]
+                    with open(ts_path, "wb") as f:
+                        f.write(b"\x00" * 300)
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                # Final remux: fail once, then write a valid-looking mp4.part
+                state["final_calls"] += 1
+                part_path = cmd[-1]
+                if state["final_calls"] == 1:
+                    return SimpleNamespace(returncode=1, stdout="", stderr="transient fail\n")
+                with open(part_path, "wb") as f:
+                    f.write(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2mp41" + b"\x00" * 2048)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("sp_sync.sharepoint.sync_engine.subprocess.run", side_effect=fake_run), patch(
+                "sp_sync.sharepoint.sync_engine._ffprobe_duration_seconds", return_value=1.0
+            ), patch(
+                "sp_sync.sharepoint.sync_engine._resolve_ffprobe_path", return_value="/usr/bin/ffprobe"
+            ):
+                ok, size = _mux_captured_tracks(
+                    "/usr/bin/ffmpeg",
+                    v_file,
+                    a_file,
+                    out,
+                    log=logs.append,
+                    tmp_dir=tmp,
+                )
+
+            self.assertTrue(ok)
+            self.assertGreater(size, 0)
+            self.assertEqual(state["final_calls"], 2)
+            self.assertTrue(os.path.isfile(out))
+            self.assertFalse(os.path.exists(v_file))  # cleaned after success
+            self.assertTrue(any("succeeded on retry" in m.lower() for m in logs), logs)
+
+    def test_mux_keeps_inputs_when_both_attempts_fail(self):
+        logs = []
+        with tempfile.TemporaryDirectory() as tmp:
+            v_file = os.path.join(tmp, "video.fmp4")
+            a_file = os.path.join(tmp, "audio.fmp4")
+            out = os.path.join(tmp, "lecture.mp4")
+            with open(v_file, "wb") as f:
+                f.write(b"\x00" * 200)
+            with open(a_file, "wb") as f:
+                f.write(b"\x00" * 200)
+
+            def fake_run(cmd, capture_output=True, text=True, timeout=300):
+                if "-f" in cmd and cmd[cmd.index("-f") + 1] == "mpegts":
+                    with open(cmd[-1], "wb") as f:
+                        f.write(b"\x00" * 300)
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=5, stdout="", stderr="always fail\n")
+
+            with patch("sp_sync.sharepoint.sync_engine.subprocess.run", side_effect=fake_run):
+                ok, size = _mux_captured_tracks(
+                    "/usr/bin/ffmpeg", v_file, a_file, out, log=logs.append, tmp_dir=tmp
+                )
+
+            self.assertFalse(ok)
+            self.assertEqual(size, 0)
+            self.assertTrue(os.path.exists(v_file))
+            self.assertTrue(os.path.exists(a_file))
+            self.assertTrue(any(v_file in m for m in logs), logs)
 
 
 if __name__ == "__main__":
