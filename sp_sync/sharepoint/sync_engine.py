@@ -108,6 +108,116 @@ def _ts_to_mp4_part_cmd(ffmpeg_path, ts_output, part_path):
     ]
 
 
+def _log_final_mux_failure(res_final, res_mux, log=print):
+    """Log the failing ffmpeg step. Prefer cmd_final (res_final) over step-1 res_mux.
+
+    Historically failures logged ``res_mux.returncode`` (often 0) even when the
+    final remux failed — always report the step-2 exit code and stderr when present.
+    """
+    if res_final is not None:
+        rc = res_final.returncode
+        log(f"    ❌ Final mux failed (exit {rc})")
+        tail = _ffmpeg_stderr_tail(getattr(res_final, "stderr", None))
+        if tail:
+            log(f"    DEBUG res_final stderr: {tail}")
+        elif rc == 0:
+            log("    DEBUG res_final: process exited 0 but output failed validation")
+        return rc
+    rc = res_mux.returncode if res_mux is not None else -1
+    log(f"    ❌ Final mux failed (exit {rc})")
+    if res_mux is not None:
+        tail = _ffmpeg_stderr_tail(getattr(res_mux, "stderr", None))
+        if tail:
+            log(f"    DEBUG res_mux stderr: {tail}")
+    return rc
+
+
+def _mux_captured_tracks(ff, v_file, a_file, output_path, log=print, tmp_dir=None):
+    """Mux captured fMP4 video/audio tracks into ``output_path``.
+
+    Returns ``(ok, size_bytes)``. On failure keeps temp inputs and logs the
+    *final* remux returncode/stderr (not step-1 ``res_mux``).
+    """
+    work_dir = tmp_dir or os.path.dirname(v_file) or TMP_DIR
+    os.makedirs(work_dir, exist_ok=True)
+    ts_output = os.path.join(work_dir, "merged.ts")
+    if os.path.exists(ts_output):
+        try:
+            os.remove(ts_output)
+        except OSError:
+            pass
+
+    cmd_mux = [
+        ff,
+        "-y",
+        "-i",
+        v_file,
+        "-i",
+        a_file,
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0?",
+        "-c:v",
+        "copy",
+        "-c:a:0",
+        "aac",
+        "-f",
+        "mpegts",
+        ts_output,
+    ]
+    res_mux = subprocess.run(cmd_mux, capture_output=True, text=True, timeout=600)
+
+    if res_mux.returncode != 0:
+        log("    🔄 Retrying mux without audio...")
+        cmd_v_only = [ff, "-y", "-i", v_file, "-c:v", "copy", "-f", "mpegts", ts_output]
+        res_mux = subprocess.run(cmd_v_only, capture_output=True, text=True, timeout=300)
+
+    res_final = None
+    part_path = output_path + ".part"
+    if res_mux.returncode == 0 and os.path.exists(ts_output):
+        cmd_final = _ts_to_mp4_part_cmd(ff, ts_output, part_path)
+        res_final = subprocess.run(
+            cmd_final, capture_output=True, text=True, timeout=300
+        )
+
+        ok = (
+            res_final.returncode == 0
+            and os.path.exists(part_path)
+            and os.path.getsize(part_path) > 1024
+            and _is_valid_mp4(part_path)
+        )
+        duration = None
+        probe = _resolve_ffprobe_path(ff)
+        if ok and probe:
+            duration = _ffprobe_duration_seconds(part_path, probe)
+            if duration is None:
+                ok = False
+                log("    ❌ ffprobe could not read duration of muxed MP4")
+
+        if ok:
+            os.replace(part_path, output_path)
+            size = os.path.getsize(output_path)
+            for tmp in (v_file, a_file, ts_output):
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+            if duration is not None:
+                log(f"    ✅ Muxed MP4 duration: {duration:.1f}s")
+            return True, size
+
+    _log_final_mux_failure(res_final, res_mux, log=log)
+    kept = [p for p in (v_file, a_file, ts_output, part_path) if os.path.exists(p)]
+    if kept:
+        log("    📁 Kept temp files for debugging: " + ", ".join(kept))
+    else:
+        log("    📁 No temp files remained to keep")
+    return False, 0
+
+
+
 # Force UTF-8 via env (must be set before other imports that might use stdout)
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -747,94 +857,8 @@ def download_video_via_capture(
         log("    ❌ ffmpeg not available — install ffmpeg or set FFMPEG_PATH")
         return False, 0
 
-    # Step 1: Convert/Concatenate to a robust format (MPEG-TS) to handle fMP4 discontinuities
-    ts_output = os.path.join(TMP_DIR, "merged.ts")
-    if os.path.exists(ts_output):
-        os.remove(ts_output)
+    return _mux_captured_tracks(ff, v_file, a_file, output_path, log=log, tmp_dir=TMP_DIR)
 
-    # Use -f mpegts to force a streamable format that handles appended fragments better
-    cmd_mux = [
-        ff,
-        "-y",
-        "-i",
-        v_file,
-        "-i",
-        a_file,
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0?",
-        "-c:v",
-        "copy",
-        "-c:a:0",
-        "aac",
-        "-f",
-        "mpegts",
-        ts_output,
-    ]
-
-    res_mux = subprocess.run(cmd_mux, capture_output=True, text=True, timeout=600)
-
-    if res_mux.returncode != 0:
-        log("    🔄 Retrying mux without audio...")
-        cmd_v_only = [ff, "-y", "-i", v_file, "-c:v", "copy", "-f", "mpegts", ts_output]
-        res_mux = subprocess.run(cmd_v_only, capture_output=True, text=True, timeout=300)
-
-    # Step 2: Final remux to MP4 with faststart.
-    # Output is *.mp4.part, so -f mp4 is required; ffmpeg cannot guess the muxer from .part.
-    res_final = None
-    part_path = output_path + ".part"
-    if res_mux.returncode == 0 and os.path.exists(ts_output):
-        cmd_final = _ts_to_mp4_part_cmd(ff, ts_output, part_path)
-        res_final = subprocess.run(
-            cmd_final, capture_output=True, text=True, timeout=300
-        )
-
-        ok = (
-            res_final.returncode == 0
-            and os.path.exists(part_path)
-            and os.path.getsize(part_path) > 1024
-            and _is_valid_mp4(part_path)
-        )
-        duration = None
-        probe = _resolve_ffprobe_path(ff)
-        if ok and probe:
-            duration = _ffprobe_duration_seconds(part_path, probe)
-            if duration is None:
-                ok = False
-                log("    ❌ ffprobe could not read duration of muxed MP4")
-
-        if ok:
-            os.replace(part_path, output_path)
-            size = os.path.getsize(output_path)
-            for tmp in (v_file, a_file, ts_output):
-                if os.path.exists(tmp):
-                    try:
-                        os.remove(tmp)
-                    except OSError:
-                        pass
-            if duration is not None:
-                log(f"    ✅ Muxed MP4 duration: {duration:.1f}s")
-            return True, size
-
-    # Failure: keep temps so the capture can be remuxed by hand, and log step-2 status.
-    rc = res_final.returncode if res_final is not None else res_mux.returncode
-    log(f"    ❌ Final mux failed (exit {rc})")
-    if res_final is not None:
-        tail = _ffmpeg_stderr_tail(res_final.stderr)
-        if tail:
-            log(f"    DEBUG res_final stderr: {tail}")
-    elif res_mux.stderr:
-        tail = _ffmpeg_stderr_tail(res_mux.stderr)
-        if tail:
-            log(f"    DEBUG res_mux stderr: {tail}")
-    kept = [p for p in (v_file, a_file, ts_output, part_path) if os.path.exists(p)]
-    if kept:
-        log("    📁 Kept temp files for debugging: " + ", ".join(kept))
-    else:
-        log("    📁 No temp files remained to keep")
-            
-    return False, 0
 
 
 def _sp_url_leaf_segment(server_rel_url):
