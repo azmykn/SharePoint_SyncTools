@@ -3,5 +3,10 @@
   "database_path": "data/app.sqlite",
   "default_guest_share_link": "",
   "duration_tolerance_pct": 0.02,
-  "duration_tolerance_seconds": 30.0
+  "duration_tolerance_seconds": 30.0,
+  "trim_silence_enabled": false,
+  "trim_silence_noise_db": -70.0,
+  "trim_silence_min_duration": 2.0,
+  "trim_silence_margin_sec": 3.0,
+  "trim_silence_merge_gap_sec": 120.0
 }

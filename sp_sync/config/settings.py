@@ -17,6 +17,12 @@ DEFAULTS: dict[str, Any] = {
     # Post-download duration check: fail when |actual-expected| > max(abs, pct*expected)
     "duration_tolerance_pct": 0.02,
     "duration_tolerance_seconds": 30.0,
+    # Post-download silence trim (start/end only via longest merged speech region)
+    "trim_silence_enabled": False,
+    "trim_silence_noise_db": -70.0,
+    "trim_silence_min_duration": 2.0,
+    "trim_silence_margin_sec": 3.0,
+    "trim_silence_merge_gap_sec": 120.0,
 }
 
 

@@ -2021,6 +2021,20 @@ def _download_one_file(
     parent_folder_name = os.path.basename(os.path.dirname(local_path))
     start_file_progress(parent_folder_name, name, remote_size or 0)
 
+    def _finish_success(msg_size_path=local_path):
+        size_now = os.path.getsize(msg_size_path) if os.path.isfile(msg_size_path) else 0
+        if is_video:
+            try:
+                from sp_sync.sharepoint.silence_trim import trim_silence_edges
+
+                trim_silence_edges(msg_size_path, log=log)
+                if os.path.isfile(msg_size_path):
+                    size_now = os.path.getsize(msg_size_path)
+            except Exception as trim_exc:
+                log(f"    ⚠️ Silence trim skipped due to error: {trim_exc}")
+        complete_file_progress(name)
+        return size_now
+
     # Strategy 1: v2.0/shares API if sharing link is provided
     from sp_sync.sharepoint.rest_folder_list import (
         _should_try_v2_shares,
@@ -2060,9 +2074,9 @@ def _download_one_file(
                                         dl += len(chunk)
                                         update_file_progress(dl, tot)
                                 os.replace(part_path, local_path)
-                                complete_file_progress(name)
+                                size_now = _finish_success(local_path)
                                 log(
-                                    f"✅ Downloaded '{name}' via shares API ({os.path.getsize(local_path)/1024/1024:.1f} MB)"
+                                    f"✅ Downloaded '{name}' via shares API ({size_now/1024/1024:.1f} MB)"
                                 )
                                 return 1
                     finally:
@@ -2101,9 +2115,9 @@ def _download_one_file(
                                 dl += len(chunk)
                                 update_file_progress(dl, tot)
                         os.replace(part_path, local_path)
-                        complete_file_progress(name)
+                        size_now = _finish_success(local_path)
                         log(
-                            f"✅ Downloaded '{name}' via API ({os.path.getsize(local_path)/1024/1024:.1f} MB)"
+                            f"✅ Downloaded '{name}' via API ({size_now/1024/1024:.1f} MB)"
                         )
                         return 1
                     finally:
@@ -2137,7 +2151,7 @@ def _download_one_file(
             page, file_rel_url, local_path, log, sp_site_url=sp_site_url
         )
     if success:
-        complete_file_progress(name)
+        size = _finish_success(local_path)
         log(f"✅ Finished '{name}' ({size/1024/1024:.1f} MB)")
         return 1
     log(f"❌ Failed '{name}'")
