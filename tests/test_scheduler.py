@@ -109,7 +109,8 @@ class TestScheduler(unittest.TestCase):
         self.assertFalse(self.is_run_due())
 
         # Future daily_time today → not due yet
-        future_hhmm = (datetime.now() + timedelta(hours=2)).strftime("%H:%M")
+        _n = datetime.now()
+        future_hhmm = min(_n + timedelta(hours=2), _n.replace(hour=23, minute=59)).strftime("%H:%M")
         self.save_scheduler_settings({
             "enabled": True,
             "schedule_mode": "daily",
