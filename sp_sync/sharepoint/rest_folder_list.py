@@ -238,7 +238,17 @@ def _file_rows(file_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not name or not rel:
             continue
         size = fi.get("Length", 0)
-        out.append({"name": name, "rel_url": rel, "size": size})
+        modified = (
+            fi.get("TimeLastModified")
+            or fi.get("Modified")
+            or fi.get("TimeCreated")
+            or fi.get("lastModifiedDateTime")
+            or ""
+        )
+        row = {"name": name, "rel_url": rel, "size": size}
+        if modified:
+            row["modified"] = modified
+        out.append(row)
     return out
 
 
@@ -487,6 +497,9 @@ def _v2_shares_list_children(
                     item_id = item.get("id")
                     if isinstance(item_id, str) and item_id.strip():
                         row["item_id"] = item_id.strip()
+                    modified = item.get("lastModifiedDateTime") or item.get("createdDateTime") or ""
+                    if modified:
+                        row["modified"] = modified
                     files_out.append(row)
             return {
                 "ok": True,

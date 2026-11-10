@@ -2407,6 +2407,7 @@ def _sync_folder_recursive(
         log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s)")
 
     downloaded_count = 0
+    folder_hint = os.path.basename(os.path.abspath(download_dir.rstrip("/\\"))) or ""
     for file_row in listing.get("files") or []:
         name = file_row.get("name") or ""
         rel_url = file_row.get("rel_url") or ""
@@ -2414,7 +2415,14 @@ def _sync_folder_recursive(
             continue
         file_item_id = file_row.get("item_id")
         sz = file_row.get("size") or 0
-        local_path = os.path.join(download_dir, name)
+        from sp_sync.sharepoint.naming import preferred_download_path
+
+        local_path = preferred_download_path(
+            download_dir,
+            name,
+            folder_hint=folder_hint,
+            modified=file_row.get("modified"),
+        )
         downloaded_count += _download_one_file(
             session,
             page,
