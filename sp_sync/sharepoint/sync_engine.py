@@ -33,6 +33,81 @@ def _is_valid_mp4(file_path: str) -> bool:
     except Exception:
         return False
 
+
+def _resolve_ffprobe_path(ffmpeg_path=None):
+    """Prefer ffprobe next to ffmpeg, then PATH."""
+    candidates = []
+    if ffmpeg_path:
+        d = os.path.dirname(os.path.abspath(ffmpeg_path))
+        base = os.path.basename(ffmpeg_path)
+        probe_name = "ffprobe.exe" if base.lower().endswith(".exe") else "ffprobe"
+        candidates.append(os.path.join(d, probe_name))
+    which = shutil.which("ffprobe")
+    if which:
+        candidates.append(which)
+    for p in candidates:
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def _ffprobe_duration_seconds(file_path, ffprobe_path=None):
+    """Return media duration in seconds, or None if unreadable."""
+    probe = ffprobe_path or _resolve_ffprobe_path()
+    if not probe or not os.path.isfile(file_path):
+        return None
+    try:
+        res = subprocess.run(
+            [
+                probe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                file_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if res.returncode != 0:
+            return None
+        raw = (res.stdout or "").strip()
+        if not raw or raw.upper() == "N/A":
+            return None
+        duration = float(raw)
+        return duration if duration > 0 else None
+    except (ValueError, TypeError, OSError, subprocess.SubprocessError):
+        return None
+
+
+def _ffmpeg_stderr_tail(text, max_lines=8):
+    """Last non-empty ffmpeg log lines, for debugging without dumping the full log."""
+    if not text:
+        return ""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines[-max_lines:])
+
+
+def _ts_to_mp4_part_cmd(ffmpeg_path, ts_output, part_path):
+    """Remux MPEG-TS into a *.mp4.part file. -f mp4 is required: ffmpeg cannot guess the muxer from a .part extension."""
+    return [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        ts_output,
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        part_path,
+    ]
+
+
 # Force UTF-8 via env (must be set before other imports that might use stdout)
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -705,39 +780,59 @@ def download_video_via_capture(
         cmd_v_only = [ff, "-y", "-i", v_file, "-c:v", "copy", "-f", "mpegts", ts_output]
         res_mux = subprocess.run(cmd_v_only, capture_output=True, text=True, timeout=300)
 
-    # Step 2: Final conversion to MP4 with faststart
+    # Step 2: Final remux to MP4 with faststart.
+    # Output is *.mp4.part, so -f mp4 is required; ffmpeg cannot guess the muxer from .part.
+    res_final = None
+    part_path = output_path + ".part"
     if res_mux.returncode == 0 and os.path.exists(ts_output):
-        part_path = output_path + ".part"
-        cmd_final = [
-            ff,
-            "-y",
-            "-i",
-            ts_output,
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            part_path,
-        ]
-        res_final = subprocess.run(cmd_final, capture_output=True, text=True, timeout=300)
-        
-        # Cleanup TS
-        if os.path.exists(ts_output): os.remove(ts_output)
-        
-        if res_final.returncode == 0 and os.path.exists(part_path) and os.path.getsize(part_path) > 1024:
+        cmd_final = _ts_to_mp4_part_cmd(ff, ts_output, part_path)
+        res_final = subprocess.run(
+            cmd_final, capture_output=True, text=True, timeout=300
+        )
+
+        ok = (
+            res_final.returncode == 0
+            and os.path.exists(part_path)
+            and os.path.getsize(part_path) > 1024
+            and _is_valid_mp4(part_path)
+        )
+        duration = None
+        probe = _resolve_ffprobe_path(ff)
+        if ok and probe:
+            duration = _ffprobe_duration_seconds(part_path, probe)
+            if duration is None:
+                ok = False
+                log("    ❌ ffprobe could not read duration of muxed MP4")
+
+        if ok:
             os.replace(part_path, output_path)
             size = os.path.getsize(output_path)
+            for tmp in (v_file, a_file, ts_output):
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+            if duration is not None:
+                log(f"    ✅ Muxed MP4 duration: {duration:.1f}s")
             return True, size
 
-    # Cleanup temp
-    for f in [v_file, a_file, ts_output]:
-        if os.path.exists(f):
-            try: os.remove(f)
-            except: pass
-
-    log(f"    ❌ Final mux failed (exit {res_mux.returncode})")
-    if res_mux.stderr:
-        log(f"    DEBUG: {res_mux.stderr.splitlines()[-1] if res_mux.stderr.splitlines() else 'Unknown error'}")
+    # Failure: keep temps so the capture can be remuxed by hand, and log step-2 status.
+    rc = res_final.returncode if res_final is not None else res_mux.returncode
+    log(f"    ❌ Final mux failed (exit {rc})")
+    if res_final is not None:
+        tail = _ffmpeg_stderr_tail(res_final.stderr)
+        if tail:
+            log(f"    DEBUG res_final stderr: {tail}")
+    elif res_mux.stderr:
+        tail = _ffmpeg_stderr_tail(res_mux.stderr)
+        if tail:
+            log(f"    DEBUG res_mux stderr: {tail}")
+    kept = [p for p in (v_file, a_file, ts_output, part_path) if os.path.exists(p)]
+    if kept:
+        log("    📁 Kept temp files for debugging: " + ", ".join(kept))
+    else:
+        log("    📁 No temp files remained to keep")
             
     return False, 0
 
@@ -1897,6 +1992,7 @@ def _sync_folder_recursive(
     sharing_link_url: str | None = None,
     share_root_norm: str | None = None,
     allow_non_mp4: bool = True,
+    parent_item_id: str | None = None,
 ):
     """Internal recursive folder sync (same listing stack as /sp/browse)."""
     from sp_sync.sharepoint.rest_folder_list import list_folder_children_rest
@@ -1920,6 +2016,7 @@ def _sync_folder_recursive(
         timeout=120,
         sharing_link_url=share_for_list or None,
         share_root_norm=share_root_norm,
+        parent_item_id=parent_item_id,
     )
     if not listing.get("ok"):
         guest = load_guest_link().strip()
@@ -1933,6 +2030,7 @@ def _sync_folder_recursive(
                 timeout=120,
                 sharing_link_url=guest,
                 share_root_norm=root_path or share_root_norm,
+                parent_item_id=parent_item_id,
             )
             if listing.get("ok"):
                 share_for_list = guest
@@ -1963,7 +2061,15 @@ def _sync_folder_recursive(
     method = listing.get("method") or "rest"
     n_f = len(listing.get("folders") or [])
     n_files = len(listing.get("files") or [])
-    log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s)")
+    ext_counts: dict[str, int] = {}
+    for _row in listing.get("files") or []:
+        _ext = os.path.splitext(_row.get("name") or "")[1].lower() or "(none)"
+        ext_counts[_ext] = ext_counts.get(_ext, 0) + 1
+    _types = ", ".join(f"{n} {ext}" for ext, n in sorted(ext_counts.items()))
+    if _types:
+        log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s) ({_types})")
+    else:
+        log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s)")
 
     downloaded_count = 0
     for file_row in listing.get("files") or []:
@@ -2007,6 +2113,7 @@ def _sync_folder_recursive(
             sharing_link_url=sharing_link_url,
             share_root_norm=share_root_norm,
             allow_non_mp4=allow_non_mp4,
+            parent_item_id=folder_row.get("item_id"),
         )
 
     return downloaded_count

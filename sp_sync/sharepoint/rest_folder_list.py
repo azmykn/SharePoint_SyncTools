@@ -20,6 +20,41 @@ _MAX_PAGES = 50
 _MAX_ITEMS = 10000
 
 
+
+# SPO $expand collections are often capped at the default list page size (100).
+_EXPAND_PAGE_SIZE_HINT = 100
+
+
+def _collection_next_url(block: Any) -> str | None:
+    """Return a next-page URL from a verbose or v4 OData collection object, if present."""
+    if not isinstance(block, dict):
+        return None
+    for key in ("__next", "@odata.nextLink", "odata.nextLink"):
+        val = block.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def expand_collections_need_pagination(payload: dict[str, Any]) -> bool:
+    """True when an $expand Folders/Files payload is truncated (next link or a full first page)."""
+    if not isinstance(payload, dict):
+        return False
+    d = payload.get("d")
+    if not isinstance(d, dict):
+        return False
+    for key in ("Folders", "Files"):
+        block = d.get(key)
+        if not isinstance(block, dict):
+            continue
+        if _collection_next_url(block):
+            return True
+        results = block.get("results")
+        if isinstance(results, list) and len(results) >= _EXPAND_PAGE_SIZE_HINT:
+            return True
+    return False
+
+
 _RETRY_HTTP_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -556,7 +591,9 @@ def list_folder_children_rest(
             expand_files = _file_rows(fi_exp)
             # OneDrive / SPO often returns inline $expand with empty results even when
             # /Folders and /Files list children. Only trust expand when it returns something.
-            if expand_folders or expand_files:
+            # $expand also does not follow __next, so a truncated first page must fall through
+            # to the paginated /Folders and /Files split.
+            if (expand_folders or expand_files) and not expand_collections_need_pagination(exp_json):
                 return {
                     "ok": True,
                     "normalized_parent": norm,

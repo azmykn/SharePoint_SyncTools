@@ -21,7 +21,13 @@ from sp_sync.sync_metrics import (
     complete_file_progress,
     get_live_metrics,
 )
-from sp_sync.sharepoint.sync_engine import _is_valid_mp4
+from sp_sync.sharepoint.sync_engine import (
+    _is_valid_mp4,
+    _ts_to_mp4_part_cmd,
+    _ffprobe_duration_seconds,
+    _resolve_ffprobe_path,
+    resolve_ffmpeg_path,
+)
 
 
 class TestMetricsAndIntegrity(unittest.TestCase):
@@ -92,6 +98,48 @@ class TestMetricsAndIntegrity(unittest.TestCase):
             with open(valid_moov, "wb") as f:
                 f.write(b"\x00\x00\x00\x08moov" + b"\x00" * 200)
             self.assertTrue(_is_valid_mp4(valid_moov))
+
+
+
+    def test_ts_to_mp4_part_cmd_forces_mp4_format(self):
+        """*.mp4.part has no muxer; the command must pass -f mp4."""
+        cmd = _ts_to_mp4_part_cmd("/usr/bin/ffmpeg", "/tmp/merged.ts", "/tmp/out.mp4.part")
+        self.assertEqual(cmd[-1], "/tmp/out.mp4.part")
+        self.assertIn("-f", cmd)
+        self.assertEqual(cmd[cmd.index("-f") + 1], "mp4")
+        # format flag must precede the output path
+        self.assertLess(cmd.index("-f"), len(cmd) - 1)
+        self.assertLess(cmd.index("-f"), cmd.index("/tmp/out.mp4.part"))
+
+    def test_ffmpeg_remux_to_mp4_part(self):
+        """End-to-end: the same step-2 command must produce a readable MP4 from a .part name."""
+        ff = resolve_ffmpeg_path(log=lambda *_a, **_k: None)
+        if not ff or not os.path.isfile(ff):
+            self.skipTest("ffmpeg not available")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ts_path = os.path.join(tmp_dir, "merged.ts")
+            part_path = os.path.join(tmp_dir, "lecture.mp4.part")
+            gen = [
+                ff, "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc=duration=1:size=320x240:rate=15",
+                "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                "-f", "mpegts", ts_path,
+            ]
+            import subprocess
+            res = subprocess.run(gen, capture_output=True, text=True, timeout=60)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertTrue(os.path.isfile(ts_path) and os.path.getsize(ts_path) > 0)
+
+            cmd = _ts_to_mp4_part_cmd(ff, ts_path, part_path)
+            res2 = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertTrue(_is_valid_mp4(part_path))
+            probe = _resolve_ffprobe_path(ff)
+            if probe:
+                duration = _ffprobe_duration_seconds(part_path, probe)
+                self.assertIsNotNone(duration)
+                self.assertGreater(duration, 0)
 
 
 class TestEnhancementRoutes(unittest.TestCase):

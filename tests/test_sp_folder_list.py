@@ -17,6 +17,7 @@ sys.path.insert(0, _REPO_ROOT)
 from sp_sync.sharepoint.rest_folder_list import (
     encode_path_for_get_folder_param,
     extract_embedded_expand_results,
+    expand_collections_need_pagination,
     fetch_odata_collection_all_pages,
     list_folder_children_rest,
     normalize_server_relative_folder_path,
@@ -306,6 +307,90 @@ class TestListFolderChildrenRest(unittest.TestCase):
         self.assertEqual(out["method"], "expand")
         self.assertEqual(len(out["folders"]), 1)
         self.assertEqual(out["folders"][0]["name"], "F1")
+
+
+    def test_expand_with_next_link_falls_back_to_split(self):
+        """$expand first page with __next must not hide remaining files."""
+        expand_payload = {
+            "d": {
+                "Folders": {"results": []},
+                "Files": {
+                    "results": [
+                        {"Name": "a.pdf", "ServerRelativeUrl": "/w/a.pdf", "Length": 10}
+                    ],
+                    "__next": "https://host/_api/Files?$skiptoken=page2",
+                },
+            }
+        }
+        sess = self._Sess(
+            [
+                _resp(200, expand_payload),
+                _resp(200, {"d": {"results": []}}),
+                _resp(
+                    200,
+                    {
+                        "d": {
+                            "results": [
+                                {
+                                    "Name": "a.pdf",
+                                    "ServerRelativeUrl": "/w/a.pdf",
+                                    "Length": 10,
+                                },
+                                {
+                                    "Name": "b.mp4",
+                                    "ServerRelativeUrl": "/w/b.mp4",
+                                    "Length": 20,
+                                },
+                            ]
+                        }
+                    },
+                ),
+            ]
+        )
+        out = list_folder_children_rest(sess, "https://host/sites/Site", "/w", timeout=5)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["method"], "split")
+        names = sorted(f["name"] for f in out["files"])
+        self.assertEqual(names, ["a.pdf", "b.mp4"])
+
+    def test_expand_full_page_falls_back_to_split(self):
+        """A full 100-item $expand page is treated as possibly truncated."""
+        files = [
+            {"Name": f"f{i:03d}.pdf", "ServerRelativeUrl": f"/w/f{i:03d}.pdf", "Length": i}
+            for i in range(100)
+        ]
+        expand_payload = {"d": {"Folders": {"results": []}, "Files": {"results": files}}}
+        more = files + [
+            {"Name": "f100.pdf", "ServerRelativeUrl": "/w/f100.pdf", "Length": 100}
+        ]
+        sess = self._Sess(
+            [
+                _resp(200, expand_payload),
+                _resp(200, {"d": {"results": []}}),
+                _resp(200, {"d": {"results": more}}),
+            ]
+        )
+        out = list_folder_children_rest(sess, "https://host/sites/Site", "/w", timeout=5)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["method"], "split")
+        self.assertEqual(len(out["files"]), 101)
+
+    def test_expand_collections_need_pagination_helper(self):
+        self.assertFalse(
+            expand_collections_need_pagination(
+                {"d": {"Folders": {"results": []}, "Files": {"results": [{"Name": "a"}]}}}
+            )
+        )
+        self.assertTrue(
+            expand_collections_need_pagination(
+                {
+                    "d": {
+                        "Folders": {"results": []},
+                        "Files": {"results": [{"Name": "a"}], "__next": "https://x"},
+                    }
+                }
+            )
+        )
 
     def test_fallback_split_when_expand_empty_d(self):
         sess = self._Sess(
