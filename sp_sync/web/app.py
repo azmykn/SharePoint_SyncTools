@@ -1757,8 +1757,20 @@ except Exception as _exc:
 
 
 if __name__ == "__main__":
+    from sp_sync.single_instance import acquire_app_lock, release_app_lock
+
+    host = os.environ.get("SP_SYNC_HOST", "127.0.0.1")
+    port = int(os.environ.get("SP_SYNC_PORT", os.environ.get("PORT", "5000")))
+    ok, msg = acquire_app_lock(host=host, port=port)
+    if not ok:
+        print(f"❌ {msg}")
+        raise SystemExit(1)
     print("=" * 50)
-    print("  Unified Sync Tool — http://127.0.0.1:5000")
+    print(f"  Unified Sync Tool — http://{host}:{port}")
+    print(f"  {msg}")
     print("  Tip: run from repo root with: python app.py")
     print("=" * 50)
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    try:
+        app.run(host=host, port=port, debug=False)
+    finally:
+        release_app_lock()
