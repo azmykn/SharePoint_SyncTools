@@ -1639,12 +1639,15 @@ def scheduler_run_now_route():
 def _ledger_groups():
     """Ledger rows grouped by subject folder, lectures in sequence order."""
     from sp_sync.db.store import get_store
-    from sp_sync.sharepoint.naming import parse_lecture_filename, subject_from_folder, lecture_datetime
+    from sp_sync.sharepoint.naming import (
+        parse_lecture_filename, subject_from_folder, lecture_datetime, subject_dir,
+    )
+    from sp_sync.sharepoint.ledger import resolve_ledger_path
 
     groups = {}
     for row in get_store().ledger_list():
         local_path = row.get('local_path') or ''
-        folder = row.get('local_dir') or os.path.dirname(local_path)
+        folder = subject_dir(row.get('local_dir') or os.path.dirname(local_path))
         g = groups.setdefault(folder, {
             'folder': folder,
             'folder_name': os.path.basename(folder.rstrip('/\\')),
@@ -1654,8 +1657,9 @@ def _ledger_groups():
         name = os.path.basename(local_path)
         parsed = parse_lecture_filename(name) or {}
         when = lecture_datetime(row.get('original_name') or '', row.get('modified'))
-        exists = bool(local_path) and os.path.isfile(local_path)
-        size = row.get('size') or (os.path.getsize(local_path) if exists else 0)
+        found = resolve_ledger_path(local_path)
+        exists = bool(found)
+        size = row.get('size') or (os.path.getsize(found) if exists else 0)
         g['items'].append({
             'item_key': row.get('item_key'),
             'name': name,

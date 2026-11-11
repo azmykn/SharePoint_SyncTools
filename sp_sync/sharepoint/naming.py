@@ -128,14 +128,38 @@ def resolve_existing_lecture_path(
     short, original = lecture_candidate_names(
         original_name, folder_hint=folder_hint, modified=modified
     )
-    for name in (short, original):
-        path = os.path.join(download_dir, name)
-        if os.path.isfile(path):
-            return path
+    for d in lecture_search_dirs(download_dir):
+        for name in (short, original):
+            path = os.path.join(d, name)
+            if os.path.isfile(path):
+                return path
     return None
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi"}
+
+# Lecture videos live in "<subject folder>/تسجيلات/"; slides stay in "محاضرات/".
+RECORDINGS_DIRNAME = "تسجيلات"
+
+
+def recordings_dir(download_dir: str) -> str:
+    """``<subject>/تسجيلات`` (unchanged if *download_dir* already is that folder)."""
+    d = os.path.abspath(download_dir.rstrip("/\\") or download_dir)
+    if os.path.basename(d) == RECORDINGS_DIRNAME:
+        return d
+    return os.path.join(d, RECORDINGS_DIRNAME)
+
+
+def subject_dir(path_dir: str) -> str:
+    """Subject folder for a directory (parent if it is the recordings folder)."""
+    d = os.path.abspath(path_dir.rstrip("/\\") or path_dir)
+    return os.path.dirname(d) if os.path.basename(d) == RECORDINGS_DIRNAME else d
+
+
+def lecture_search_dirs(download_dir: str) -> list:
+    """Where a lecture video may already exist: recordings folder first, then the old top level."""
+    top = subject_dir(download_dir)
+    return [recordings_dir(top), top]
 
 _TRAILING_CODE_RE = re.compile(r"[\s\-_]*\b[A-Za-z]{2,10}-?\d{1,4}\s*$")
 _NEW_NAME_RE = re.compile(
@@ -150,7 +174,10 @@ def is_video_name(name: str) -> bool:
 
 def subject_from_folder(folder: Optional[str]) -> str:
     """``'إدارة التحول الرقمي MBA-09'`` -> ``'إدارة التحول الرقمي'``."""
-    base = os.path.basename((folder or "").rstrip("/\\")).strip()
+    folder = (folder or "").rstrip("/\\")
+    if os.path.basename(folder) == RECORDINGS_DIRNAME:
+        folder = os.path.dirname(folder)
+    base = os.path.basename(folder).strip()
     subject = _TRAILING_CODE_RE.sub("", base).strip(" -_")
     subject = _UNSAFE_CHARS_RE.sub("_", subject).strip()
     return subject or _UNSAFE_CHARS_RE.sub("_", base).strip() or "lecture"
@@ -185,10 +212,11 @@ def build_lecture_filename(subject: str, when: Optional[datetime], seq: int, ext
 def next_lecture_sequence(download_dir: str, extra_names=()) -> int:
     """Next NN for a folder: max(seq of v2 names on disk + ledger names) + 1."""
     names = list(extra_names or ())
-    try:
-        names.extend(os.listdir(download_dir))
-    except OSError:
-        pass
+    for d in lecture_search_dirs(download_dir):
+        try:
+            names.extend(os.listdir(d))
+        except OSError:
+            pass
     best = 0
     for n in names:
         parsed = parse_lecture_filename(n)
@@ -204,14 +232,20 @@ def new_lecture_download_path(
     modified: Optional[str] = None,
     extra_names=(),
 ) -> str:
-    """Fresh v2 path for a lecture that was never downloaded."""
+    """Fresh v2 path (inside ``<subject>/تسجيلات``) for a lecture that was never downloaded."""
     ext = os.path.splitext(original_name or "")[1] or ".mp4"
     subject = subject_from_folder(download_dir)
     when = lecture_datetime(original_name, modified)
     seq = next_lecture_sequence(download_dir, extra_names)
+    target_dir = recordings_dir(download_dir)
     while True:
-        path = os.path.join(download_dir, build_lecture_filename(subject, when, seq, ext))
-        if not os.path.exists(path) and not os.path.exists(path + ".part"):
+        name = build_lecture_filename(subject, when, seq, ext)
+        path = os.path.join(target_dir, name)
+        taken = any(
+            os.path.exists(os.path.join(d, name)) or os.path.exists(os.path.join(d, name) + ".part")
+            for d in lecture_search_dirs(download_dir)
+        )
+        if not taken:
             return path
         seq += 1
 
@@ -224,7 +258,8 @@ def preferred_download_path(
     modified: Optional[str] = None,
     extra_names=(),
 ) -> str:
-    """Existing old long/short path if present, else a new v2 name (videos) or the original name."""
+    """Existing old long/short path if present (recordings folder or old top level), else a new v2
+    path in ``<subject>/تسجيلات`` for videos, or the original name in the folder for other files."""
     existing = resolve_existing_lecture_path(
         download_dir, original_name, folder_hint=folder_hint, modified=modified
     )

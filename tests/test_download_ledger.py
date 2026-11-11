@@ -166,6 +166,68 @@ class TestBackfill(_Base):
         self.assertIsNotNone(ledger.plan_download(self.store, self.dir, rows[0]))
 
 
+class TestRecordingsFolder(_Base):
+    """Videos live in <subject>/تسجيلات; the old top level is still recognised."""
+
+    def setUp(self):
+        super().setUp()
+        self.rec = os.path.join(self.dir, "تسجيلات")
+
+    def test_new_video_goes_to_recordings_and_pdf_stays(self):
+        p = ledger.plan_download(self.store, self.dir, self.row("20261114_131300"))
+        self.assertEqual(os.path.dirname(p), self.rec)
+        self.assertTrue(os.path.isdir(self.rec))
+        self.assertEqual(os.path.basename(p), f"{SUBJ}_2026-11-14_01.mp4")
+        self.assertEqual(os.path.dirname(preferred_download_path(self.dir, "Slides.pdf")), self.dir)
+
+    def test_sequence_counts_both_locations(self):
+        os.makedirs(self.rec)
+        _touch(os.path.join(self.rec, f"{SUBJ}_2026-10-10_01.mp4"))
+        _touch(os.path.join(self.dir, f"{SUBJ}_2026-10-17_02.mp4"))
+        self.assertEqual(next_lecture_sequence(self.dir), 3)
+        p = ledger.plan_download(self.store, self.dir, self.row("20261024_153151"))
+        self.assertEqual(p, os.path.join(self.rec, f"{SUBJ}_2026-10-24_03.mp4"))
+
+    def test_old_short_name_in_either_place_not_redownloaded(self):
+        os.makedirs(self.rec)
+        a = _touch(os.path.join(self.rec, "MBA-09_2026-10-10_1643.mp4"))
+        b = _touch(os.path.join(self.dir, _long("20261017_154834")))
+        self.assertEqual(preferred_download_path(self.dir, _long("20261010_164311")), a)
+        self.assertEqual(preferred_download_path(self.dir, _long("20261017_154834")), b)
+
+    def test_backfill_finds_v2_names_in_recordings(self):
+        os.makedirs(self.rec)
+        a = _touch(os.path.join(self.rec, f"{SUBJ}_2026-10-10_01.mp4"))
+        r = self.row("20261010_164311", size=999)
+        self.assertEqual(ledger.backfill_folder(self.store, self.dir, [r]), 1)
+        self.assertEqual(self.store.ledger_get(ledger_key(r["item_id"], None))["local_path"], a)
+
+    def test_ledger_path_fallback_after_move(self):
+        old = _touch(os.path.join(self.dir, f"{SUBJ}_2026-10-10_01.mp4"))
+        r = self.row("20261010_164311")
+        key = self.store.ledger_record(item_id=r["item_id"], rel_url=r["rel_url"],
+                                       original_name=r["name"], local_path=old)
+        os.makedirs(self.rec)
+        moved = os.path.join(self.rec, os.path.basename(old))
+        os.rename(old, moved)
+        self.assertEqual(ledger.resolve_ledger_path(old), moved)
+        self.assertIsNone(ledger.plan_download(self.store, self.dir, r))
+        # re-download of a moved file targets the recordings folder and keeps the copy
+        self.store.ledger_request_redownload(key)
+        target = ledger.plan_download(self.store, self.dir, r)
+        self.assertEqual(target, moved)
+        self.assertTrue(os.path.exists(os.path.join(self.rec, f"{SUBJ}_2026-10-10_01_old.mp4")))
+
+    def test_redownload_of_deleted_file_goes_to_recordings(self):
+        r = self.row("20261010_164311")
+        old = os.path.join(self.dir, f"{SUBJ}_2026-10-10_01.mp4")
+        key = self.store.ledger_record(item_id=r["item_id"], rel_url=r["rel_url"],
+                                       original_name=r["name"], local_path=old)
+        self.store.ledger_request_redownload(key)
+        self.assertEqual(ledger.plan_download(self.store, self.dir, r),
+                         os.path.join(self.rec, f"{SUBJ}_2026-10-10_01.mp4"))
+
+
 class TestLedgerRoutes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -206,6 +268,19 @@ class TestLedgerRoutes(unittest.TestCase):
         self.assertEqual(data["groups"][0]["subject"], SUBJ)
         self.assertTrue(data["groups"][0]["items"][0]["local_exists"])
         self.assertEqual(data["groups"][0]["items"][0]["seq"], 1)
+
+    def test_page_finds_file_moved_to_recordings(self):
+        d = os.path.join(self.tmp.name, FOLDER)
+        rec = os.path.join(d, "تسجيلات")
+        os.makedirs(rec)
+        os.rename(os.path.join(d, f"{SUBJ}_2026-10-10_01.mp4"), os.path.join(rec, f"{SUBJ}_2026-10-10_01.mp4"))
+        p2 = _touch(os.path.join(rec, f"{SUBJ}_2026-10-17_02.mp4"))
+        self.store.ledger_record(item_id="A2", rel_url="/y", original_name=_long("20261017_154834"),
+                                 local_path=p2, size=10)
+        groups = self.client.get("/api/ledger").get_json()["groups"]
+        self.assertEqual(len(groups), 1)  # recordings folder grouped under its subject
+        self.assertEqual([it["seq"] for it in groups[0]["items"]], [1, 2])
+        self.assertTrue(all(it["local_exists"] for it in groups[0]["items"]))
 
     def test_redownload_endpoint(self):
         res = self.client.post("/api/ledger/redownload", json={"item_key": self.key})

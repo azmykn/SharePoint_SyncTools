@@ -14,6 +14,8 @@ from typing import Callable, Iterable, Optional
 from sp_sync.db.store import ledger_key
 from sp_sync.sharepoint.naming import (
     is_video_name,
+    lecture_search_dirs,
+    recordings_dir,
     lecture_datetime,
     parse_lecture_filename,
     preferred_download_path,
@@ -36,6 +38,27 @@ def _local_size(path: str) -> int:
         return os.path.getsize(path)
     except OSError:
         return -1
+
+
+def resolve_ledger_path(local_path: Optional[str]) -> Optional[str]:
+    """Existing file for a ledger path: as recorded, else same name in ``تسجيلات`` or the old top level."""
+    if not local_path:
+        return None
+    if os.path.isfile(local_path):
+        return local_path
+    d, name = os.path.split(os.path.abspath(local_path))
+    for cand_dir in lecture_search_dirs(d):
+        cand = os.path.join(cand_dir, name)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def ledger_names_for(store, download_dir: str) -> list:
+    names = []
+    for d in lecture_search_dirs(download_dir):
+        names.extend(store.ledger_names_in_dir(d))
+    return names
 
 
 def _record(store, row: dict, local_path: str, source: str) -> None:
@@ -85,16 +108,19 @@ def backfill_folder(store, download_dir: str, files: Iterable[dict], log: Option
             rest.append(r)
 
     # 2) v2 names grouped by date
-    try:
-        local_names = sorted(os.listdir(download_dir))
-    except OSError:
-        local_names = []
     local_by_date: dict[str, list[tuple[int, str]]] = defaultdict(list)
-    for n in local_names:
-        parsed = parse_lecture_filename(n)
-        path = os.path.abspath(os.path.join(download_dir, n))
-        if parsed and os.path.isfile(path) and path not in claimed:
-            local_by_date[parsed["date"]].append((parsed["seq"], path))
+    seen_names = set()
+    for d in lecture_search_dirs(download_dir):
+        try:
+            local_names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for n in local_names:
+            parsed = parse_lecture_filename(n)
+            path = os.path.abspath(os.path.join(d, n))
+            if parsed and n not in seen_names and os.path.isfile(path) and path not in claimed:
+                seen_names.add(n)
+                local_by_date[parsed["date"]].append((parsed["seq"], path))
 
     remote_by_date: dict[str, list] = defaultdict(list)
     for r in rest:
@@ -147,12 +173,18 @@ def plan_download(store, download_dir: str, row: dict, log: Optional[LogFn] = No
         log(f"[-] Skip '{name}' (in download ledger as '{shown}')")
         return None
     if entry and entry.get("redownload_requested"):
-        target = entry.get("local_path") or ""
-        if not target or not os.path.isdir(os.path.dirname(target)):
+        recorded = entry.get("local_path") or ""
+        target = resolve_ledger_path(recorded)
+        if not target and recorded and is_video_name(recorded):
+            target = os.path.join(recordings_dir(download_dir), os.path.basename(recorded))
+        elif not target and recorded and os.path.isdir(os.path.dirname(recorded)):
+            target = recorded
+        if not target:
             target = preferred_download_path(
                 download_dir, name, modified=row.get("modified"),
-                extra_names=store.ledger_names_in_dir(download_dir),
+                extra_names=ledger_names_for(store, download_dir),
             )
+        os.makedirs(os.path.dirname(target), exist_ok=True)
         if os.path.exists(target):
             stem, ext = os.path.splitext(target)
             aside = f"{stem}_old{ext}"
@@ -164,13 +196,15 @@ def plan_download(store, download_dir: str, row: dict, log: Optional[LogFn] = No
             log(f"  ↪ Re-download requested: kept current copy as '{os.path.basename(aside)}'")
         return target
     folder_hint = os.path.basename(os.path.abspath(download_dir.rstrip("/\\"))) or ""
-    return preferred_download_path(
+    target = preferred_download_path(
         download_dir,
         name,
         folder_hint=folder_hint,
         modified=row.get("modified"),
-        extra_names=store.ledger_names_in_dir(download_dir),
+        extra_names=ledger_names_for(store, download_dir),
     )
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    return target
 
 
 def record_after_download(
