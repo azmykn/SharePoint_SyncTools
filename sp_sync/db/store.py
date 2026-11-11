@@ -64,6 +64,30 @@ class AppStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_log_entries_ts ON log_entries(ts DESC)"
             )
+            # Download ledger: every SharePoint item that was ever downloaded (or matched
+            # to an existing local file).  Items listed here are never downloaded again,
+            # even if the local file is renamed, moved, trimmed or deleted, unless the
+            # user asks for a re-download (redownload_requested = 1).
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS downloaded_files (
+                    item_key TEXT PRIMARY KEY,
+                    item_id TEXT,
+                    rel_url TEXT,
+                    original_name TEXT NOT NULL DEFAULT '',
+                    size INTEGER,
+                    modified TEXT,
+                    local_dir TEXT,
+                    local_path TEXT,
+                    source TEXT NOT NULL DEFAULT 'download',
+                    redownload_requested INTEGER NOT NULL DEFAULT 0,
+                    downloaded_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_downloaded_files_dir ON downloaded_files(local_dir)"
+            )
 
     def get_text(self, key: str, default: str = "") -> str:
         with _lock, self._connect() as conn:
@@ -240,6 +264,107 @@ class AppStore:
             if isinstance(it, dict) and (it.get("service") or "").strip().lower() != svc
         ]
         self.set_json(KEY_SYNC_REPORT_HISTORY, kept)
+
+
+    # ---------------- download ledger ----------------
+    def ledger_get(self, item_key: str) -> Optional[dict]:
+        if not item_key:
+            return None
+        with _lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM downloaded_files WHERE item_key = ?", (item_key,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def ledger_record(
+        self,
+        *,
+        item_id: Optional[str],
+        rel_url: Optional[str],
+        original_name: str,
+        local_path: str,
+        size: Optional[int] = None,
+        modified: Optional[str] = None,
+        source: str = "download",
+    ) -> str:
+        """Insert or update a ledger row (clears any pending re-download request)."""
+        import os as _os
+
+        key = ledger_key(item_id, rel_url)
+        if not key:
+            raise ValueError("ledger_record needs item_id or rel_url")
+        local_dir = _os.path.dirname(_os.path.abspath(local_path)) if local_path else ""
+        now = datetime.now().isoformat(timespec="seconds")
+        with _lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO downloaded_files (item_key, item_id, rel_url, original_name, size,
+                    modified, local_dir, local_path, source, redownload_requested, downloaded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                ON CONFLICT(item_key) DO UPDATE SET
+                    item_id = excluded.item_id, rel_url = excluded.rel_url,
+                    original_name = excluded.original_name, size = excluded.size,
+                    modified = excluded.modified, local_dir = excluded.local_dir,
+                    local_path = excluded.local_path, source = excluded.source,
+                    redownload_requested = 0, downloaded_at = excluded.downloaded_at
+                """,
+                (key, item_id or None, rel_url or None, original_name or "",
+                 int(size) if size else None, modified, local_dir,
+                 _os.path.abspath(local_path) if local_path else "", source, now),
+            )
+        return key
+
+    def ledger_request_redownload(self, item_key: str) -> bool:
+        with _lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE downloaded_files SET redownload_requested = 1 WHERE item_key = ?",
+                (item_key,),
+            )
+        return cur.rowcount > 0
+
+    def ledger_cancel_redownload(self, item_key: str) -> bool:
+        with _lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE downloaded_files SET redownload_requested = 0 WHERE item_key = ?",
+                (item_key,),
+            )
+        return cur.rowcount > 0
+
+    def ledger_delete(self, item_key: str) -> bool:
+        with _lock, self._connect() as conn:
+            cur = conn.execute("DELETE FROM downloaded_files WHERE item_key = ?", (item_key,))
+        return cur.rowcount > 0
+
+    def ledger_list(self) -> list[dict]:
+        with _lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM downloaded_files ORDER BY local_dir, local_path"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def ledger_paths(self) -> set:
+        with _lock, self._connect() as conn:
+            rows = conn.execute("SELECT local_path FROM downloaded_files").fetchall()
+        return {r[0] for r in rows if r[0]}
+
+    def ledger_names_in_dir(self, local_dir: str) -> list[str]:
+        import os as _os
+
+        d = _os.path.abspath(local_dir)
+        with _lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT local_path FROM downloaded_files WHERE local_dir = ?", (d,)
+            ).fetchall()
+        return [_os.path.basename(r[0]) for r in rows if r[0]]
+
+
+def ledger_key(item_id: Optional[str], rel_url: Optional[str]) -> str:
+    """Stable ledger key: SharePoint item id, else server-relative URL."""
+    if item_id and str(item_id).strip():
+        return f"id:{str(item_id).strip()}"
+    if rel_url and str(rel_url).strip():
+        return f"url:{str(rel_url).strip()}"
+    return ""
 
 
 def get_store() -> AppStore:

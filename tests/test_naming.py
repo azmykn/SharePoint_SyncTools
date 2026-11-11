@@ -78,8 +78,9 @@ class TestNaming(unittest.TestCase):
             self.assertEqual(found2, short_path)
 
             os.remove(short_path)
+            # Nothing on disk -> new v2 name (folder has no subject besides the code)
             preferred = preferred_download_path(tmp, long_name, folder_hint="MBA-09")
-            self.assertEqual(preferred, os.path.join(tmp, short))
+            self.assertTrue(os.path.basename(preferred).endswith("_2026-11-07_01.mp4"))
 
 
 if __name__ == "__main__":

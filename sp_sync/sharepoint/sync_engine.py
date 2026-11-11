@@ -2407,7 +2407,13 @@ def _sync_folder_recursive(
         log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s)")
 
     downloaded_count = 0
-    folder_hint = os.path.basename(os.path.abspath(download_dir.rstrip("/\\"))) or ""
+    from sp_sync.sharepoint import ledger as _ledger
+
+    _store = get_store()
+    try:
+        _ledger.backfill_folder(_store, download_dir, listing.get("files") or [], log=log)
+    except Exception as exc:  # never block a sync on the ledger
+        log(f"  ⚠️ Ledger backfill failed: {exc}")
     for file_row in listing.get("files") or []:
         name = file_row.get("name") or ""
         rel_url = file_row.get("rel_url") or ""
@@ -2415,15 +2421,12 @@ def _sync_folder_recursive(
             continue
         file_item_id = file_row.get("item_id")
         sz = file_row.get("size") or 0
-        from sp_sync.sharepoint.naming import preferred_download_path
 
-        local_path = preferred_download_path(
-            download_dir,
-            name,
-            folder_hint=folder_hint,
-            modified=file_row.get("modified"),
-        )
-        downloaded_count += _download_one_file(
+        local_path = _ledger.plan_download(_store, download_dir, file_row, log=log)
+        if local_path is None:
+            continue
+        existed_before = os.path.isfile(local_path)
+        got = _download_one_file(
             session,
             page,
             sp_site_url,
@@ -2436,6 +2439,15 @@ def _sync_folder_recursive(
             share_root_norm=share_root_norm,
             remote_size=sz,
         )
+        downloaded_count += got
+        try:
+            _ledger.record_after_download(
+                _store, file_row, local_path, got, existed_before,
+                is_valid=lambda p: (not _ledger.is_video_name(p))
+                or (_is_valid_mp4(p) and os.path.getsize(p) >= 1024 * 1024),
+            )
+        except Exception as exc:
+            log(f"  ⚠️ Could not record '{name}' in download ledger: {exc}")
 
     for folder_row in listing.get("folders") or []:
         folder_name = folder_row.get("name") or ""

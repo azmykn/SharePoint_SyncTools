@@ -1,4 +1,11 @@
-"""Short lecture filenames derived from SharePoint / Teams metadata."""
+"""Lecture filenames derived from SharePoint / Teams metadata.
+
+Current format (v2): ``<subject>_<YYYY-MM-DD>_<NN>.mp4`` where *subject* is the
+local folder name without its trailing program code (``MBA-09``) and *NN* is a
+per-folder sequence in chronological order.  Older names (the original long
+Teams name and the v1 short ``MBA-09_2026-11-07_1649.mp4``) are still
+recognised so nothing is downloaded twice.
+"""
 
 from __future__ import annotations
 
@@ -128,20 +135,104 @@ def resolve_existing_lecture_path(
     return None
 
 
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi"}
+
+_TRAILING_CODE_RE = re.compile(r"[\s\-_]*\b[A-Za-z]{2,10}-?\d{1,4}\s*$")
+_NEW_NAME_RE = re.compile(
+    r"^(?P<subject>.+)_(?P<date>20\d{2}-\d{2}-\d{2}|unknown)_(?P<seq>\d{2,3})(?P<ext>\.[A-Za-z0-9]+)$"
+)
+_UNSAFE_CHARS_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+
+
+def is_video_name(name: str) -> bool:
+    return os.path.splitext(name or "")[1].lower() in VIDEO_EXTS
+
+
+def subject_from_folder(folder: Optional[str]) -> str:
+    """``'إدارة التحول الرقمي MBA-09'`` -> ``'إدارة التحول الرقمي'``."""
+    base = os.path.basename((folder or "").rstrip("/\\")).strip()
+    subject = _TRAILING_CODE_RE.sub("", base).strip(" -_")
+    subject = _UNSAFE_CHARS_RE.sub("_", subject).strip()
+    return subject or _UNSAFE_CHARS_RE.sub("_", base).strip() or "lecture"
+
+
+def parse_lecture_filename(name: str) -> Optional[dict]:
+    """Parse a v2 name; returns ``{subject, date, seq, ext}`` or ``None``."""
+    m = _NEW_NAME_RE.match(os.path.basename(name or ""))
+    if not m:
+        return None
+    return {
+        "subject": m.group("subject"),
+        "date": m.group("date"),
+        "seq": int(m.group("seq")),
+        "ext": m.group("ext").lower(),
+    }
+
+
+def lecture_datetime(original_name: str, modified: Optional[str] = None) -> Optional[datetime]:
+    """Recording time from the long Teams name, else SharePoint modified time."""
+    return extract_datetime_from_name(os.path.basename(original_name or "")) or parse_sharepoint_time(modified)
+
+
+def build_lecture_filename(subject: str, when: Optional[datetime], seq: int, ext: str = ".mp4") -> str:
+    date = when.strftime("%Y-%m-%d") if when else "unknown"
+    ext = (ext or ".mp4").lower()
+    if not ext.startswith("."):
+        ext = "." + ext
+    return f"{subject}_{date}_{int(seq):02d}{ext}"
+
+
+def next_lecture_sequence(download_dir: str, extra_names=()) -> int:
+    """Next NN for a folder: max(seq of v2 names on disk + ledger names) + 1."""
+    names = list(extra_names or ())
+    try:
+        names.extend(os.listdir(download_dir))
+    except OSError:
+        pass
+    best = 0
+    for n in names:
+        parsed = parse_lecture_filename(n)
+        if parsed:
+            best = max(best, parsed["seq"])
+    return best + 1
+
+
+def new_lecture_download_path(
+    download_dir: str,
+    original_name: str,
+    *,
+    modified: Optional[str] = None,
+    extra_names=(),
+) -> str:
+    """Fresh v2 path for a lecture that was never downloaded."""
+    ext = os.path.splitext(original_name or "")[1] or ".mp4"
+    subject = subject_from_folder(download_dir)
+    when = lecture_datetime(original_name, modified)
+    seq = next_lecture_sequence(download_dir, extra_names)
+    while True:
+        path = os.path.join(download_dir, build_lecture_filename(subject, when, seq, ext))
+        if not os.path.exists(path) and not os.path.exists(path + ".part"):
+            return path
+        seq += 1
+
+
 def preferred_download_path(
     download_dir: str,
     original_name: str,
     *,
     folder_hint: Optional[str] = None,
     modified: Optional[str] = None,
+    extra_names=(),
 ) -> str:
-    """Path to write a new download (short name), unless the long name already exists."""
+    """Existing old long/short path if present, else a new v2 name (videos) or the original name."""
     existing = resolve_existing_lecture_path(
         download_dir, original_name, folder_hint=folder_hint, modified=modified
     )
     if existing:
         return existing
-    short, _original = lecture_candidate_names(
-        original_name, folder_hint=folder_hint, modified=modified
+    original = os.path.basename(original_name or "") or "lecture.mp4"
+    if not is_video_name(original):
+        return os.path.join(download_dir, original)
+    return new_lecture_download_path(
+        download_dir, original, modified=modified, extra_names=extra_names
     )
-    return os.path.join(download_dir, short)

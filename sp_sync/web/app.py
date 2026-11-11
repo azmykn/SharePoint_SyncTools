@@ -1636,6 +1636,74 @@ def scheduler_run_now_route():
     return jsonify(result)
 
 
+def _ledger_groups():
+    """Ledger rows grouped by subject folder, lectures in sequence order."""
+    from sp_sync.db.store import get_store
+    from sp_sync.sharepoint.naming import parse_lecture_filename, subject_from_folder, lecture_datetime
+
+    groups = {}
+    for row in get_store().ledger_list():
+        local_path = row.get('local_path') or ''
+        folder = row.get('local_dir') or os.path.dirname(local_path)
+        g = groups.setdefault(folder, {
+            'folder': folder,
+            'folder_name': os.path.basename(folder.rstrip('/\\')),
+            'subject': subject_from_folder(folder),
+            'items': [],
+        })
+        name = os.path.basename(local_path)
+        parsed = parse_lecture_filename(name) or {}
+        when = lecture_datetime(row.get('original_name') or '', row.get('modified'))
+        exists = bool(local_path) and os.path.isfile(local_path)
+        size = row.get('size') or (os.path.getsize(local_path) if exists else 0)
+        g['items'].append({
+            'item_key': row.get('item_key'),
+            'name': name,
+            'seq': parsed.get('seq'),
+            'date': parsed.get('date') or (when.strftime('%Y-%m-%d') if when else ''),
+            'size_mb': round((size or 0) / (1024 * 1024), 1),
+            'local_exists': exists,
+            'redownload_requested': bool(row.get('redownload_requested')),
+            'source': row.get('source'),
+            'downloaded_at': row.get('downloaded_at'),
+        })
+    out = []
+    for folder in sorted(groups, key=lambda f: groups[f]['subject']):
+        g = groups[folder]
+        g['items'].sort(key=lambda it: (it['seq'] is None, it['seq'] or 0, it['date'], it['name']))
+        out.append(g)
+    return out
+
+
+@app.route('/ledger')
+def ledger_page():
+    """Downloaded lectures (download ledger) grouped by subject."""
+    return render_template('ledger.html', groups=_ledger_groups())
+
+
+@app.route('/api/ledger')
+def api_ledger():
+    return jsonify({'success': True, 'groups': _ledger_groups()})
+
+
+@app.route('/api/ledger/redownload', methods=['POST'])
+def api_ledger_redownload():
+    """Mark a ledger entry so the next sync downloads it again (current copy kept as *_old)."""
+    from sp_sync.db.store import get_store
+
+    data = _request_json()
+    key = (data.get('item_key') or '').strip()
+    if not key:
+        return _json_error('item_key is required', 400, code='MISSING_ITEM_KEY')
+    cancel = bool(data.get('cancel'))
+    store = get_store()
+    ok = store.ledger_cancel_redownload(key) if cancel else store.ledger_request_redownload(key)
+    if not ok:
+        return _json_error('Ledger entry not found', 404, code='LEDGER_ENTRY_NOT_FOUND')
+    add_log('system', f"{'↩️ Re-download cancelled' if cancel else '🔁 Re-download requested'}: {key}")
+    return jsonify({'success': True, 'item_key': key, 'redownload_requested': not cancel})
+
+
 @app.route('/api/open_local_folder', methods=['POST'])
 def api_open_local_folder():
     """Open a local folder path in the OS native file manager."""
