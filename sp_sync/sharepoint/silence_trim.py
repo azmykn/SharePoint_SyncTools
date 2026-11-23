@@ -1,14 +1,16 @@
-"""Trim leading/trailing silence by keeping the longest continuous speech region.
+"""Trim leading/trailing silence from the first speech to the last speech.
 
 Uses ffmpeg ``silencedetect`` only to find speech bounds. Silence in the middle of
-the main lecture is never cut. Short isolated blips before/after the main block
-are dropped when speech segments are merged across gaps shorter than a threshold.
+the lecture is never cut. The kept window is the first speech start through the
+last speech end, plus a short margin. If that window would be under 80% of the
+original duration, the full untrimmed file is kept instead.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from typing import Callable, List, Optional, Tuple
@@ -25,6 +27,9 @@ LogFn = Callable[[str], None]
 
 _SILENCE_START_RE = re.compile(r"silence_start:\s*([0-9.]+)")
 _SILENCE_END_RE = re.compile(r"silence_end:\s*([0-9.]+)")
+
+# Refuse a trim that would discard more than 20% of the original duration.
+MIN_KEPT_RATIO = 0.80
 
 
 def silence_trim_settings() -> dict:
@@ -111,9 +116,25 @@ def merge_speech_segments(
 def longest_speech_region(
     segments: List[Tuple[float, float]],
 ) -> Optional[Tuple[float, float]]:
+    """Return the longest segment. Kept for tests; trim windows no longer use this."""
     if not segments:
         return None
     return max(segments, key=lambda se: se[1] - se[0])
+
+
+def kept_duration_is_safe(
+    start: float, end: float, duration: float, min_ratio: float = MIN_KEPT_RATIO
+) -> bool:
+    """True when the kept window is at least ``min_ratio`` of the original duration."""
+    if duration <= 0:
+        return False
+    return (end - start) >= (min_ratio * duration)
+
+
+def untrimmed_backup_path(file_path: str) -> str:
+    """Sibling path ``<name>.untrimmed.mp4`` next to the lecture file."""
+    root, ext = os.path.splitext(file_path)
+    return f"{root}.untrimmed{ext or '.mp4'}"
 
 
 def compute_trim_window(
@@ -123,14 +144,20 @@ def compute_trim_window(
     merge_gap_sec: float = 120.0,
     margin_sec: float = 3.0,
 ) -> Optional[Tuple[float, float]]:
-    """Return ``(start, end)`` cut points for the longest merged speech region + margin."""
+    """Return ``(start, end)`` from the first speech to the last speech, plus margin.
+
+    ``merge_gap_sec`` is accepted for compatibility; first and last speech bounds
+    do not change when nearby segments are merged. Returns None when there is no
+    meaningful edge trim.
+    """
     speech = silence_intervals_to_speech(silence_pairs, duration)
-    merged = merge_speech_segments(speech, merge_gap_sec)
-    region = longest_speech_region(merged)
-    if region is None:
+    if not speech:
         return None
-    start = max(0.0, region[0] - margin_sec)
-    end = min(duration, region[1] + margin_sec)
+    # merge_gap does not change the first start or last end; call it so the
+    # parameter remains part of the documented contract.
+    merge_speech_segments(speech, merge_gap_sec)
+    start = max(0.0, speech[0][0] - margin_sec)
+    end = min(duration, speech[-1][1] + margin_sec)
     if end - start < 1.0:
         return None
     # No meaningful trim.
@@ -165,8 +192,9 @@ def trim_silence_edges(
     """Trim leading/trailing silence in-place after verifying the trimmed copy.
 
     Keeps the original until the trimmed file is duration-sane and playable, then
-    replaces. Returns True when a trim was applied (or nothing to trim); False on
-    hard failure (original left intact).
+    writes an ``.untrimmed`` sibling copy and replaces. Returns True when a trim
+    was applied (or nothing to trim / safety skip); False on hard failure
+    (original left intact).
     """
     cfg = settings or silence_trim_settings()
     if not cfg.get("enabled"):
@@ -211,7 +239,19 @@ def trim_silence_edges(
         return True
 
     start, end = window
-    log(f"    ✂️ Trimming to main speech {start:.1f}s–{end:.1f}s (was 0–{duration:.1f}s)")
+    kept = end - start
+    if not kept_duration_is_safe(start, end, duration):
+        log(
+            f"    ⚠️ Trim window {start:.1f}s–{end:.1f}s is {kept:.1f}s "
+            f"({100.0 * kept / duration:.1f}% of {duration:.1f}s); "
+            f"keeping full untrimmed file (minimum {100 * MIN_KEPT_RATIO:.0f}%)"
+        )
+        return True
+
+    log(
+        f"    ✂️ Trimming leading/trailing silence {start:.1f}s–{end:.1f}s "
+        f"(was 0–{duration:.1f}s)"
+    )
 
     parent = os.path.dirname(os.path.abspath(file_path)) or "."
     fd, trimmed_path = tempfile.mkstemp(prefix="trim_", suffix=".mp4", dir=parent)
@@ -256,6 +296,12 @@ def trim_silence_edges(
                 "keeping original"
             )
             return True
+        backup = untrimmed_backup_path(file_path)
+        if not os.path.exists(backup):
+            shutil.copy2(file_path, backup)
+            log(f"    💾 Kept untrimmed copy: {os.path.basename(backup)}")
+        else:
+            log(f"    💾 Untrimmed copy already exists: {os.path.basename(backup)}")
         os.replace(trimmed_path, file_path)
         log(f"    ✅ Silence trimmed; new duration {new_dur:.1f}s")
         return True
