@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="55%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#bg)"/>
+  <rect x="6" y="6" width="116" height="58" rx="28" fill="url(#shine)"/>
+  <!-- Sync circular arrows -->
+  <g fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 38 56 A 27 27 0 0 1 86 44"/>
+    <polyline points="74 44 88 45 87 31"/>
+    <path d="M 90 72 A 27 27 0 0 1 42 84"/>
+    <polyline points="54 84 40 83 41 97"/>
+  </g>
+  <circle cx="64" cy="64" r="7" fill="#ffffff"/>
+</svg>
