@@ -8,6 +8,7 @@ get it again is an explicit re-download request from the UI / API.
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
@@ -32,6 +33,94 @@ def _noop(_msg: str) -> None:
 
 def _row_key(row: dict) -> str:
     return ledger_key(row.get("item_id"), row.get("rel_url"))
+
+
+# Teams / Stream source stamp, e.g. 20261107_181338UTC — not the local v2 date-only name.
+_RECORDING_STAMP_RE = re.compile(r"(20\d{6}_\d{6})", re.I)
+
+
+def recording_stamp(name: str) -> str:
+    """Return the stable ``YYYYMMDD_HHMMSS`` stamp from a source recording name, or ""."""
+    m = _RECORDING_STAMP_RE.search(os.path.basename(name or ""))
+    return m.group(1) if m else ""
+
+
+def _truthy_redownload(entry: Optional[dict]) -> bool:
+    return bool(entry) and bool(entry.get("redownload_requested"))
+
+
+def _int_size(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def find_ledger_entry(store, row: dict) -> Optional[dict]:
+    """Find a ledger row for *row* even if the SharePoint item id / key changed.
+
+    Lookup order:
+      1. exact item id or server-relative URL key (``ledger_key``);
+      2. the ``url:`` key for the same ``rel_url`` (older rows often have no item id);
+      3. the same source filename (``original_name``);
+      4. the same recording stamp (e.g. ``20261107_171334``), with size as a tie-breaker.
+
+    If several rows match, prefer one with ``redownload_requested``.
+    """
+    if not row:
+        return None
+    key = _row_key(row)
+    if key:
+        entry = store.ledger_get(key)
+        if entry:
+            return entry
+    rel = (row.get("rel_url") or "").strip()
+    if rel:
+        url_key = ledger_key(None, rel)
+        if url_key and url_key != key:
+            entry = store.ledger_get(url_key)
+            if entry:
+                return entry
+
+    name = os.path.basename((row.get("name") or "").strip())
+    stamp = recording_stamp(name) or recording_stamp(rel)
+    size = _int_size(row.get("size"))
+    name_hits: list[dict] = []
+    stamp_hits: list[dict] = []
+    for entry in store.ledger_list() or []:
+        orig = os.path.basename((entry.get("original_name") or "").strip())
+        entry_rel = (entry.get("rel_url") or "").strip()
+        if name and orig and orig == name:
+            name_hits.append(entry)
+            continue
+        entry_stamp = recording_stamp(orig) or recording_stamp(entry_rel)
+        if stamp and entry_stamp == stamp:
+            stamp_hits.append(entry)
+    hits = name_hits or stamp_hits
+    if not hits:
+        return None
+    if size > 0:
+        sized = [e for e in hits if _int_size(e.get("size")) == size]
+        if sized:
+            hits = sized
+    redl = [e for e in hits if _truthy_redownload(e)]
+    if redl:
+        return redl[0]
+    hits.sort(key=lambda e: e.get("downloaded_at") or "")
+    return hits[0]
+
+
+def _remember_new_key(store, row: dict, entry: dict) -> None:
+    """Record the current item id / URL as an extra ledger key for an already-known file."""
+    new_key = _row_key(row)
+    if not new_key or not entry:
+        return
+    if entry.get("item_key") == new_key or store.ledger_get(new_key) is not None:
+        return
+    local = entry.get("local_path") or ""
+    if not local:
+        return
+    _record(store, row, local, entry.get("source") or "existing")
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -183,10 +272,12 @@ def plan_download(
     """Return the local path to download *row* to, or ``None`` to skip it (in ledger)."""
     log = log or _noop
     name = row.get("name") or ""
-    entry = store.ledger_get(_row_key(row))
+    entry = find_ledger_entry(store, row)
     if entry and not entry.get("redownload_requested"):
         shown = os.path.basename(entry.get("local_path") or "") or name
         log(f"[-] Skip '{name}' (in download ledger as '{shown}')")
+        if not dry_run:
+            _remember_new_key(store, row, entry)
         return None
     if entry and entry.get("redownload_requested"):
         recorded = entry.get("local_path") or ""
@@ -215,6 +306,14 @@ def plan_download(
                 log(f"  ↪ Re-download requested: kept current copy as '{os.path.basename(aside)}'")
         return target
     folder_hint = os.path.basename(os.path.abspath(download_dir.rstrip("/\\"))) or ""
+    existing = resolve_existing_lecture_path(
+        download_dir, name, folder_hint=folder_hint, modified=row.get("modified")
+    )
+    if existing:
+        log(f"[-] Skip '{name}' (already on disk as '{os.path.basename(existing)}')")
+        if not dry_run:
+            _record(store, row, existing, "existing")
+        return None
     target = preferred_download_path(
         download_dir,
         name,

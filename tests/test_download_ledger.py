@@ -228,6 +228,69 @@ class TestRecordingsFolder(_Base):
                          os.path.join(self.rec, f"{SUBJ}_2026-10-10_01.mp4"))
 
 
+
+class TestStableLedgerIdentity(_Base):
+    """Do not re-download a recording when the SharePoint item id / ledger key changes."""
+
+    def test_recording_stamp_from_source_name(self):
+        self.assertEqual(ledger.recording_stamp(_long("20261107_171334")), "20261107_171334")
+        self.assertEqual(ledger.recording_stamp(f"{SUBJ}_2026-11-07_01.mp4"), "")
+        self.assertEqual(ledger.recording_stamp(""), "")
+
+    def test_skip_when_new_item_id_same_rel_url(self):
+        r = self.row("20261107_181338", item_id=None, size=1000)
+        path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-11-07_01.mp4"), 1000)
+        self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
+                                 local_path=path, size=1000)
+        r_new = dict(r, item_id="NEW-GUID-FROM-SHARE")
+        self.assertIsNone(ledger.plan_download(self.store, self.dir, r_new))
+        # runtime alias: the new id key now points at the same local file
+        alias = self.store.ledger_get(ledger_key("NEW-GUID-FROM-SHARE", r["rel_url"]))
+        self.assertIsNotNone(alias)
+        self.assertEqual(alias["local_path"], os.path.abspath(path))
+
+    def test_skip_when_only_original_name_and_stamp_match(self):
+        r = self.row("20261114_144615", item_id=None, size=2000)
+        path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-11-14_04.mp4"), 2000)
+        self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
+                                 local_path=path, size=2000)
+        r_new = dict(r, item_id="OTHER-ID", rel_url=r["rel_url"] + "?share=new")
+        self.assertIsNone(ledger.plan_download(self.store, self.dir, r_new))
+
+    def test_redownload_requested_honored_after_key_change(self):
+        r = self.row("20261107_181338", item_id=None, size=1000)
+        path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-11-07_01.mp4"), 1000)
+        key = self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
+                                       local_path=path, size=1000)
+        self.assertTrue(self.store.ledger_request_redownload(key))
+        r_new = dict(r, item_id="NEW-GUID-FROM-SHARE")
+        target = ledger.plan_download(self.store, self.dir, r_new)
+        self.assertEqual(target, os.path.abspath(path))
+        self.assertFalse(os.path.exists(path))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, f"{SUBJ}_2026-11-07_01_old.mp4")))
+
+    def test_skip_when_already_on_disk_even_without_ledger(self):
+        r = self.row("20261010_164311", item_id="BRAND-NEW-ID", size=500)
+        # long Teams name already on disk, nothing in the ledger
+        existing = _touch(os.path.join(self.dir, r["name"]), 500)
+        self.assertIsNone(ledger.plan_download(self.store, self.dir, r))
+        rec = self.store.ledger_get(ledger_key(r["item_id"], r["rel_url"]))
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["local_path"], os.path.abspath(existing))
+        self.assertEqual(rec["source"], "existing")
+
+    def test_same_day_different_stamp_still_downloads(self):
+        first = self.row("20261107_131335", item_id=None, size=1000)
+        path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-11-07_05.mp4"), 1000)
+        self.store.ledger_record(item_id=None, rel_url=first["rel_url"], original_name=first["name"],
+                                 local_path=path, size=1000)
+        second = self.row("20261107_171334", item_id="ID-AFTERNOON", size=2000)
+        target = ledger.plan_download(self.store, self.dir, second)
+        self.assertIsNotNone(target)
+        self.assertNotEqual(os.path.abspath(target), os.path.abspath(path))
+        self.assertTrue(os.path.basename(target).startswith(f"{SUBJ}_2026-11-07_"))
+
+
 class TestLedgerRoutes(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
