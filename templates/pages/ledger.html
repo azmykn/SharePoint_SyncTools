@@ -14,6 +14,8 @@
         </select>
         <button type="button" class="btn btn-outline btn-small" id="btn-ledger-expand-all">⊞ <span data-i18n="expandAll">Expand All</span></button>
         <button type="button" class="btn btn-outline btn-small" id="btn-ledger-collapse-all">⊟ <span data-i18n="collapseAll">Collapse All</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-ledger-redl-missing" style="{{ '' if ledger_stats.missing_count else 'display:none;' }}">🔁 <span data-i18n="queueAllMissing">Queue Missing</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-ledger-clean-untrimmed" style="display:none;">🧹 <span id="ledger-untrimmed-label" data-i18n="cleanUntrimmed">Clean .untrimmed</span></button>
       </div>
       <div class="toolbar-row">
         <div id="ledger-stats-bar" class="toolbar-row">
@@ -103,6 +105,9 @@
                       <button type="button" class="btn btn-outline btn-small" data-ledger-action="cancel-redl" data-key="{{ it.item_key }}" data-i18n="ledgerBtnCancelRedl">Cancel Queue</button>
                     {% else %}
                       <button type="button" class="btn btn-small" data-ledger-action="redl" data-key="{{ it.item_key }}" data-i18n="ledgerBtnRedl">تحميل من جديد</button>
+                    {% endif %}
+                    {% if it.local_exists %}
+                      <button type="button" class="btn btn-outline btn-small" data-ledger-action="trim" data-key="{{ it.item_key }}" data-i18n-title="trimSilenceBtn" title="Trim silence">✂️</button>
                     {% endif %}
                     <button type="button" class="btn btn-danger btn-small" data-ledger-action="delete" data-key="{{ it.item_key }}" data-i18n-title="ledgerBtnDelete" title="Remove Entry">🗑️</button>
                   </div>

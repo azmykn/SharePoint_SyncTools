@@ -1447,6 +1447,27 @@ def _build_rest_session(fedauth_cookie, rtfa_cookie, sp_site_url):
     return session
 
 
+def create_shared_sync_context(fedauth_cookie: str, rtfa_cookie: str, sp_site_url: str) -> Dict[str, Any]:
+    """Create a reusable HTTP session + warm-URL set + share-root cache for an entire sync run."""
+    return {
+        "session": _build_rest_session(fedauth_cookie, rtfa_cookie, sp_site_url),
+        "warmed_urls": set(),
+        "share_root_cache": {},
+        "cookie_expired": False,
+    }
+
+
+def close_shared_sync_context(sync_ctx: Optional[Dict[str, Any]]) -> None:
+    if not sync_ctx:
+        return
+    sess = sync_ctx.get("session")
+    if sess is not None:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
 def _sharepoint_session_and_page(fedauth_cookie, rtfa_cookie, sp_site_url, log, *, lazy_browser: bool = True):
     """Build authenticated REST session and (optionally lazy) Playwright page."""
     session = _build_rest_session(fedauth_cookie, rtfa_cookie, sp_site_url)
@@ -1745,6 +1766,7 @@ def sync_sharepoint_files(
     cancel_event: Optional[threading.Event] = None,
     dry_run: bool = False,
     stats: Optional[Dict[str, Any]] = None,
+    sync_ctx: Optional[Dict[str, Any]] = None,
 ):
     """Recursively sync a SharePoint folder using REST listing + lazy Playwright capture."""
     def log(msg):
@@ -1772,9 +1794,18 @@ def sync_sharepoint_files(
         except Exception:
             pass
 
-    session, page = _sharepoint_session_and_page(
-        fedauth_cookie, rtfa_cookie, sp_site_url, log, lazy_browser=True
-    )
+    owns_session = sync_ctx is None or sync_ctx.get("session") is None
+    if owns_session:
+        session, page = _sharepoint_session_and_page(
+            fedauth_cookie, rtfa_cookie, sp_site_url, log, lazy_browser=True
+        )
+        warmed_urls = set()
+        share_root_cache: Dict[str, str] = {}
+    else:
+        session = sync_ctx["session"]
+        page = None
+        warmed_urls = sync_ctx.setdefault("warmed_urls", set())
+        share_root_cache = sync_ctx.setdefault("share_root_cache", {})
 
     page_holder: Dict[str, Any] = {"page": page, "attempted": False}
 
@@ -1803,15 +1834,23 @@ def sync_sharepoint_files(
         share_u = guest.strip()
     share_root = ""
     if share_u:
-        root_path, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
-        if root_path:
-            share_root = root_path
-        elif guest.strip() and guest.strip() != share_u and _sp_sharing_url_has_stream_path(guest):
-            log(f"  ⚠️ Configured sharing link failed to resolve (HTTP {_st}). Falling back to active guest link.")
-            share_u = guest.strip()
+        if share_u in share_root_cache:
+            share_root = share_root_cache[share_u]
+        else:
             root_path, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
             if root_path:
                 share_root = root_path
+                share_root_cache[share_u] = root_path
+            elif guest.strip() and guest.strip() != share_u and _sp_sharing_url_has_stream_path(guest):
+                log(f"  ⚠️ Configured sharing link failed to resolve (HTTP {_st}). Falling back to active guest link.")
+                share_u = guest.strip()
+                if share_u in share_root_cache:
+                    share_root = share_root_cache[share_u]
+                else:
+                    root_path, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
+                    if root_path:
+                        share_root = root_path
+                        share_root_cache[share_u] = root_path
 
     base = (sp_site_url or get_sp_site_url()).rstrip("/")
     warm_urls = []
@@ -1821,7 +1860,7 @@ def sync_sharepoint_files(
         warm_urls.append(guest.strip())
     warm_urls.append(base + "/")
     for warm in warm_urls:
-        if warm.startswith("http"):
+        if warm.startswith("http") and warm not in warmed_urls:
             prime_sharepoint_session_for_browse(
                 session,
                 base,
@@ -1829,6 +1868,7 @@ def sync_sharepoint_files(
                 fedauth_cookie=fedauth_cookie,
                 rtfa_cookie=rtfa_cookie,
             )
+            warmed_urls.add(warm)
 
     if not share_u:
         log(
@@ -1852,9 +1892,11 @@ def sync_sharepoint_files(
             dry_run=dry_run,
             stats=stats,
             page_factory=lazy_page_factory,
+            sync_ctx=sync_ctx,
         )
     finally:
-        session.close()
+        if owns_session:
+            session.close()
 
 
 def sync_sharepoint_single_file(
@@ -1869,6 +1911,7 @@ def sync_sharepoint_single_file(
     cancel_event: Optional[threading.Event] = None,
     dry_run: bool = False,
     stats: Optional[Dict[str, Any]] = None,
+    sync_ctx: Optional[Dict[str, Any]] = None,
 ):
     """Download a single SharePoint file (with session warm-up, ledger tracking, and lazy Playwright)."""
     def log(msg):
@@ -1920,17 +1963,27 @@ def sync_sharepoint_single_file(
             stats.setdefault("planned_files", []).append({"name": row["name"], "local_path": local_path, "size": 0})
         return 1
 
-    session, _ = _sharepoint_session_and_page(
-        fedauth_cookie, rtfa_cookie, sp_site_url, log, lazy_browser=True
-    )
+    owns_session = sync_ctx is None or sync_ctx.get("session") is None
+    if owns_session:
+        session, _ = _sharepoint_session_and_page(
+            fedauth_cookie, rtfa_cookie, sp_site_url, log, lazy_browser=True
+        )
+        warmed_urls = set()
+    else:
+        session = sync_ctx["session"]
+        warmed_urls = sync_ctx.setdefault("warmed_urls", set())
+
     base = (sp_site_url or get_sp_site_url()).rstrip("/")
-    prime_sharepoint_session_for_browse(
-        session,
-        base,
-        prime_url=sharing_link or load_guest_link() or (base + "/"),
-        fedauth_cookie=fedauth_cookie,
-        rtfa_cookie=rtfa_cookie,
-    )
+    warm_url = sharing_link or load_guest_link() or (base + "/")
+    if warm_url.startswith("http") and warm_url not in warmed_urls:
+        prime_sharepoint_session_for_browse(
+            session,
+            base,
+            prime_url=warm_url,
+            fedauth_cookie=fedauth_cookie,
+            rtfa_cookie=rtfa_cookie,
+        )
+        warmed_urls.add(warm_url)
 
     page_holder: Dict[str, Any] = {"page": None, "attempted": False}
 
@@ -1984,7 +2037,8 @@ def sync_sharepoint_single_file(
                 stats["failed"] = int(stats.get("failed", 0)) + 1
         return got
     finally:
-        session.close()
+        if owns_session:
+            session.close()
 
 
 def _is_video_filename(name: str) -> bool:
@@ -2035,10 +2089,12 @@ def process_priority_redownloads(
     log_callback=None,
     *,
     only_config: Optional[dict] = None,
+    only_configs: Optional[List[dict]] = None,
     cancel_event: Optional[threading.Event] = None,
     dry_run: bool = False,
     keep_browser_open: bool = True,
     stats: Optional[Dict[str, Any]] = None,
+    sync_ctx: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Execute ``🔁 Queued for Re-download`` items FIRST before scanning regular folders.
 
@@ -2059,6 +2115,8 @@ def process_priority_redownloads(
 
     if only_config is not None:
         pending = [e for e in pending if _config_matches_ledger_entry(only_config, e)]
+    elif only_configs is not None:
+        pending = [e for e in pending if any(_config_matches_ledger_entry(c, e) for c in only_configs)]
     actionable = [e for e in pending if (e.get("rel_url") or "").strip()]
     if not actionable:
         return 0
@@ -2071,11 +2129,21 @@ def process_priority_redownloads(
 
     from sp_sync.sharepoint import ledger as _ledger
 
-    session = None if dry_run else _build_rest_session(fedauth_cookie, rtfa_cookie, sp_site_url)
+    owns_session = (not dry_run) and (sync_ctx is None or sync_ctx.get("session") is None)
+    if dry_run:
+        session = None
+        warmed_links: set = set()
+        share_root_cache: Dict[str, str] = {}
+    elif owns_session:
+        session = _build_rest_session(fedauth_cookie, rtfa_cookie, sp_site_url)
+        warmed_links = set()
+        share_root_cache = {}
+    else:
+        session = sync_ctx["session"]
+        warmed_links = sync_ctx.setdefault("warmed_urls", set())
+        share_root_cache = sync_ctx.setdefault("share_root_cache", {})
     base = (sp_site_url or get_sp_site_url()).rstrip("/")
     guest = load_guest_link().strip()
-    warmed_links: set = set()
-    share_root_cache: Dict[str, str] = {}
     page_holder: Dict[str, Any] = {"page": None, "attempted": False}
     active_share_hint = {"url": guest}
 
@@ -2209,7 +2277,7 @@ def process_priority_redownloads(
                     stats["failed"] = int(stats.get("failed", 0)) + 1
                     stats.setdefault("errors", []).append(f"Priority re-download failed: {name}")
     finally:
-        if session is not None:
+        if owns_session and session is not None:
             session.close()
         if not keep_browser_open:
             _cleanup_playwright()
@@ -2233,6 +2301,7 @@ def _sync_folder_recursive(
     dry_run: bool = False,
     stats: Optional[Dict[str, Any]] = None,
     page_factory: Optional[Callable[[], Any]] = None,
+    sync_ctx: Optional[Dict[str, Any]] = None,
 ):
     """Internal recursive folder sync (same listing stack as /sp/browse)."""
     from sp_sync.sharepoint.rest_folder_list import list_folder_children_rest
@@ -2293,6 +2362,15 @@ def _sync_folder_recursive(
         if snippet:
             log(f"   Server: {snippet[:240]}")
         if st in (401, 403) or "403" in err or "401" in err:
+            if st == 401 or "401" in err:
+                if sync_ctx is not None:
+                    sync_ctx["cookie_expired"] = True
+                try:
+                    from sp_sync.security.cookies import record_cookie_health
+
+                    record_cookie_health("expired", f"HTTP {st or 401}: {err}")
+                except Exception:
+                    pass
             if not share_for_list:
                 log(
                     "   No :f:/ sharing link on this folder. Resolve the link in SharePoint explorer, "
@@ -2499,6 +2577,7 @@ def _sync_folder_recursive(
             dry_run=dry_run,
             stats=stats,
             page_factory=page_factory,
+            sync_ctx=sync_ctx,
         )
 
     return downloaded_count
@@ -2515,6 +2594,7 @@ def start_sync_from_config(
     dry_run: bool = False,
     keep_browser_open: bool = False,
     stats: Optional[Dict[str, Any]] = None,
+    sync_ctx: Optional[Dict[str, Any]] = None,
 ):
     """Run sync for one config dict: folder (recursive) or single file via entry_type."""
     def log(msg):
@@ -2542,6 +2622,7 @@ def start_sync_from_config(
                 cancel_event=cancel_event,
                 dry_run=dry_run,
                 stats=stats,
+                sync_ctx=sync_ctx,
             )
         else:
             count = sync_sharepoint_files(
@@ -2557,6 +2638,7 @@ def start_sync_from_config(
                 cancel_event=cancel_event,
                 dry_run=dry_run,
                 stats=stats,
+                sync_ctx=sync_ctx,
             )
     except json.JSONDecodeError as exc:
         log(f"❌ Server returned non-JSON while listing folder: {exc}")

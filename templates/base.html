@@ -67,9 +67,10 @@
 
     <!-- Single Source of Truth for Connection Status -->
     <div class="sidebar-footer">
-      <a href="/settings?section=connections" class="sidebar-status-row sidebar-status-link" title="Manage SharePoint connection">
-        <span><span class="dot {{ 'dot-ok' if sp_auth else 'dot-err' }}"></span>SharePoint</span>
-        <span class="status-pill-text" data-i18n="{{ 'statusOk' if sp_auth else 'statusSetup' }}">{{ 'OK' if sp_auth else 'Setup' }}</span>
+      {% set sp_expired = sp_auth and sp_cookie_health and sp_cookie_health.status == 'expired' %}
+      <a href="/settings?section=connections" class="sidebar-status-row sidebar-status-link" title="{{ sp_cookie_health.message if sp_expired else 'Manage SharePoint connection' }}">
+        <span><span class="dot {{ 'dot-warn' if sp_expired else ('dot-ok' if sp_auth else 'dot-err') }}" id="sb-sp-dot"></span>SharePoint</span>
+        <span class="status-pill-text" id="sb-sp-text" style="{{ 'color:var(--warning);' if sp_expired else '' }}" data-i18n="{{ 'statusExpired' if sp_expired else ('statusOk' if sp_auth else 'statusSetup') }}">{{ 'Refresh' if sp_expired else ('OK' if sp_auth else 'Setup') }}</span>
       </a>
       <a href="/settings?section=connections" class="sidebar-status-row sidebar-status-link" title="Manage Google Drive connection">
         <span><span class="dot {{ 'dot-ok' if gd_auth else 'dot-err' }}" id="sb-gd-dot"></span>Google Drive</span>

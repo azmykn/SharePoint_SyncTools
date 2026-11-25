@@ -88,6 +88,12 @@ def _publish_scheduler_summary(target: str, new_files: list, downloaded_files: i
     save_scheduler_summary(summary)
     line = build_download_summary_line(summary)
     add_log("system", f"📋 {line}")
+    try:
+        from sp_sync.notifications.telegram import notify_sync_summary
+
+        notify_sync_summary(summary)
+    except Exception:
+        pass
 
 
 def _trigger_scheduled_sync(target: str = "all") -> None:

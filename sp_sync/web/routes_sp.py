@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, redirect, url_for
+from flask import Blueprint, current_app, jsonify, redirect, request, url_for
 
 from sp_sync.web.helpers import (
     _json_error,
@@ -40,6 +40,12 @@ def sp_save_cookies():
         return _json_error("FedAuth is required.", 400, code="MISSING_FEDAUTH")
 
     save_sp_cookies(fedauth, rtfa)
+    try:
+        from sp_sync.security.cookies import record_cookie_health
+
+        record_cookie_health("unknown", "Fresh cookies saved — click Test Live Connection to verify.")
+    except Exception:
+        pass
     add_log("sharepoint", "✅ Connection cookies saved.")
     return jsonify({"success": True, "fedauth_len": len(fedauth), "rtfa_len": len(rtfa)})
 
@@ -111,6 +117,18 @@ def sp_test_cookies():
     validator = CookieValidator()
     fmt = validator.validate_cookies(fedauth, rtfa)
     conn = validator.test_cookie_connectivity(fedauth, rtfa)
+    try:
+        from sp_sync.security.cookies import record_cookie_health
+
+        if conn.get("success"):
+            record_cookie_health("ok", conn.get("message", ""), conn.get("user", ""))
+        else:
+            sc = conn.get("status_code")
+            low = str(conn.get("message") or "").lower()
+            if sc in (301, 302, 303, 307, 308, 401, 403) or "expired" in low or "sign-in" in low or "rejected" in low:
+                record_cookie_health("expired", conn.get("message", ""))
+    except Exception:
+        pass
     return jsonify(
         {
             "success": bool(conn.get("success")),
@@ -120,6 +138,20 @@ def sp_test_cookies():
             "user": conn.get("user", ""),
         }
     )
+
+
+@sp_bp.route("/sp/cookie_health", methods=["GET"])
+def sp_cookie_health():
+    """Return cached SharePoint cookie health (or live-check when ``?refresh=1``)."""
+    from sp_sync.security.cookies import check_sharepoint_cookie_health, get_cached_cookie_health
+
+    fedauth, rtfa = load_sp_cookies()
+    refresh = (request.args.get("refresh") or "").strip().lower() in ("1", "true", "yes")
+    if refresh:
+        health = check_sharepoint_cookie_health(fedauth, rtfa, force=True)
+    else:
+        health = get_cached_cookie_health() if (fedauth and rtfa) else {"status": "unknown", "message": ""}
+    return jsonify({"success": True, "configured": bool(fedauth and rtfa), "health": health})
 
 
 @sp_bp.route("/sp/browse", methods=["POST"])
@@ -554,3 +586,64 @@ def sp_save_guest_link():
             add_log("sharepoint", f"⚠️ Failed to update config sharing links: {e}")
     add_log("sharepoint", "Guest share link saved" if link else "Guest share link cleared")
     return jsonify({"success": True, "updated_folders": updated_count})
+
+
+@sp_bp.route("/sp/bulk_action", methods=["POST"])
+def sp_bulk_action():
+    """Apply a bulk action ('enable', 'disable', or 'sync') to selected SharePoint target indices."""
+    data = _request_json()
+    action = (data.get("action") or "").strip().lower()
+    raw_indices = data.get("indices")
+    if action not in ("enable", "disable", "sync"):
+        return _json_error("action must be 'enable', 'disable', or 'sync'.", 400, code="INVALID_BULK_ACTION")
+    if not isinstance(raw_indices, list) or not raw_indices:
+        return _json_error("Select at least one SharePoint target.", 400, code="NO_TARGETS_SELECTED")
+
+    configs = load_sp_configs()
+    valid_indices = []
+    seen = set()
+    for raw_i in raw_indices:
+        try:
+            idx = int(raw_i)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(configs) and idx not in seen:
+            seen.add(idx)
+            valid_indices.append(idx)
+
+    if not valid_indices:
+        return _json_error("No valid folder indices provided.", 400, code="INVALID_INDICES")
+
+    if action in ("enable", "disable"):
+        new_val = action == "enable"
+        for idx in valid_indices:
+            configs[idx]["sync_enabled"] = new_val
+        save_sp_configs(configs)
+        add_log(
+            "sharepoint",
+            f"{'▶️ Bulk enabled' if new_val else '⏸️ Bulk paused'} {len(valid_indices)} SharePoint target(s).",
+        )
+        return jsonify({"success": True, "action": action, "updated": len(valid_indices), "configs": configs})
+
+    # action == "sync"
+    orch = current_app.extensions["sync_orchestrator"]
+    if orch.is_running("sharepoint"):
+        return _json_error("A SharePoint sync is already running.", 409, code="SYNC_ALREADY_RUNNING")
+    fedauth, rtfa = load_sp_cookies()
+    if not fedauth:
+        return _json_error("Please save FedAuth first.", 401, code="MISSING_COOKIES")
+    site = sp_site()
+    if not site:
+        return _json_error("SharePoint site URL is not set yet.", 400, code="MISSING_SITE_URL")
+
+    ok, msg, _t = orch.start_sharepoint(
+        fedauth=fedauth,
+        rtfa=rtfa,
+        site_url=site,
+        configs=configs,
+        trigger="bulk_selected",
+        config_indices=valid_indices,
+    )
+    if not ok:
+        return _json_error(msg, 409 if "running" in msg.lower() else 400, code="SP_BULK_SYNC_FAILED")
+    return jsonify({"success": True, "action": "sync", "count": len(valid_indices), "message": msg})

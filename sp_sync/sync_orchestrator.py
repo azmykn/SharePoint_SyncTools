@@ -64,6 +64,7 @@ class SyncOrchestrator:
         trigger: str = "manual",
         dry_run: bool = False,
         config_index: Optional[int] = None,
+        config_indices: Optional[List[int]] = None,
         on_complete: Optional[Callable[[dict], None]] = None,
     ) -> Tuple[bool, str, Optional[threading.Thread]]:
         """Atomically reserve and start a SharePoint sync background thread."""
@@ -75,14 +76,33 @@ class SyncOrchestrator:
             cancel_ev = threading.Event()
             self._cancel_events["sharepoint"] = cancel_ev
 
+        explicit_subset = False
         if config_index is not None:
             if 0 <= config_index < len(configs):
                 active_selected = [(config_index, configs[config_index])]
                 paused_selected: List[Tuple[int, dict]] = []
+                explicit_subset = True
             else:
                 with self._lock:
                     self.status["sharepoint"]["running"] = False
                 return False, "Invalid folder index.", None
+        elif config_indices is not None:
+            seen_i = set()
+            active_selected = []
+            for raw_i in config_indices:
+                try:
+                    idx_i = int(raw_i)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= idx_i < len(configs) and idx_i not in seen_i:
+                    seen_i.add(idx_i)
+                    active_selected.append((idx_i, configs[idx_i]))
+            if not active_selected:
+                with self._lock:
+                    self.status["sharepoint"]["running"] = False
+                return False, "No valid folders selected.", None
+            paused_selected = []
+            explicit_subset = True
         else:
             # Pre-filter paused/excluded folders UP FRONT before starting the sync loop
             active_selected = [
@@ -121,10 +141,27 @@ class SyncOrchestrator:
                 from sp_sync.sharepoint.sync_engine import (
                     _cleanup_playwright,
                     _config_matches_ledger_entry,
+                    close_shared_sync_context,
+                    create_shared_sync_context,
                     process_priority_redownloads,
                     start_sync_from_config,
                 )
 
+                # Proactive pre-flight cookie check on scheduled runs (alerts early on Telegram/sidebar)
+                if trigger == "scheduler" and not dry_run:
+                    try:
+                        from sp_sync.notifications.telegram import notify_cookie_expired
+                        from sp_sync.security.cookies import check_sharepoint_cookie_health
+
+                        chk = check_sharepoint_cookie_health(fedauth, rtfa, force=True)
+                        if chk.get("status") == "expired":
+                            msg_exp = chk.get("message") or "SharePoint cookies expired."
+                            self._log("sharepoint", f"⚠️ Pre-flight cookie check failed: {msg_exp}")
+                            notify_cookie_expired(msg_exp)
+                    except Exception:
+                        pass
+
+                shared_ctx = create_shared_sync_context(fedauth, rtfa, site_url)
                 try:
                     # Phase 0: Give strict top priority to 🔁 Queued for Re-download items BEFORE folder scans!
                     if not cancel_ev.is_set():
@@ -138,7 +175,8 @@ class SyncOrchestrator:
                             "cancelled": False,
                         }
                         try:
-                            only_cfg = active_selected[0][1] if config_index is not None else None
+                            only_cfg = active_selected[0][1] if (config_index is not None) else None
+                            only_cfgs = [c for _i, c in active_selected] if (explicit_subset and config_index is None) else None
                             redl_count = process_priority_redownloads(
                                 fedauth,
                                 rtfa,
@@ -146,10 +184,12 @@ class SyncOrchestrator:
                                 configs,
                                 log_callback=lambda msg: self._log("sharepoint", msg),
                                 only_config=only_cfg,
+                                only_configs=only_cfgs,
                                 cancel_event=cancel_ev,
                                 dry_run=dry_run,
                                 keep_browser_open=True,
                                 stats=redl_stats,
+                                sync_ctx=shared_ctx,
                             )
                             total += int(redl_count or 0)
                             new_files.extend(redl_stats.get("new_files") or [])
@@ -205,6 +245,7 @@ class SyncOrchestrator:
                                 dry_run=dry_run,
                                 keep_browser_open=True,
                                 stats=cfg_stats,
+                                sync_ctx=shared_ctx,
                             )
                             downloaded = int(count or 0)
                             total += downloaded
@@ -241,6 +282,14 @@ class SyncOrchestrator:
                             )
                             self._log("sharepoint", f"❌ Config failed: {msg}")
                 finally:
+                    if shared_ctx.get("cookie_expired"):
+                        try:
+                            from sp_sync.notifications.telegram import notify_cookie_expired
+
+                            notify_cookie_expired("SharePoint returned HTTP 401 during sync.")
+                        except Exception:
+                            pass
+                    close_shared_sync_context(shared_ctx)
                     _cleanup_playwright()
 
                 if cancel_ev.is_set():

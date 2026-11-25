@@ -26,6 +26,7 @@ from sp_sync.web.helpers import (
     add_log,
     build_shell_context,
     cleanup_tmp_segments,
+    cleanup_untrimmed_backups,
     get_system_health,
     is_allowed_open_folder_target,
     load_gdrive_configs,
@@ -34,10 +35,13 @@ from sp_sync.web.helpers import (
     log_buffer,
     save_gdrive_configs,
     save_sp_configs,
+    scan_untrimmed_backups,
     sp_site,
 )
 
 system_bp = Blueprint("system_bp", __name__)
+_trim_lock = __import__("threading").Lock()
+_trimming_keys: set = set()
 
 _LEGACY_TAB_REDIRECTS = {
     "overview": "system_bp.index",
@@ -202,6 +206,7 @@ def gdrive_page():
 def settings_page():
     """Unified Settings & Health page organized into 3 horizontal sections."""
     from sp_sync.db.store import get_store
+    from sp_sync.notifications.telegram import get_telegram_settings
 
     section = (request.args.get("section") or "connections").strip().lower()
     if section not in ("connections", "automation", "health"):
@@ -217,6 +222,7 @@ def settings_page():
             sp_guest_link_display=get_store().get_guest_link(),
             scheduler_settings=get_scheduler_settings(),
             app_settings=get_editable_app_settings(),
+            telegram_settings=get_telegram_settings(masked=True),
         ),
     )
 
@@ -497,6 +503,124 @@ def api_ledger_delete():
         return _json_error("Ledger entry not found", 404, code="LEDGER_ENTRY_NOT_FOUND")
     add_log("system", f"🗑️ Ledger entry deleted: {key}")
     return jsonify({"success": True, "item_key": key})
+
+
+@system_bp.route("/api/ledger/redownload_missing", methods=["POST"])
+def api_ledger_redownload_missing():
+    """Queue all missing ledger entries for priority re-download on the next sync."""
+    from sp_sync.db.store import get_store
+
+    store = get_store()
+    groups = _ledger_groups(status_filter="missing")
+    queued = 0
+    for g in groups:
+        for it in g.get("items") or []:
+            if not it.get("redownload_requested") and it.get("item_key"):
+                if store.ledger_request_redownload(it["item_key"]):
+                    queued += 1
+    if queued:
+        add_log("system", f"🔁 Queued {queued} missing lecture(s) for priority re-download.")
+    return jsonify({"success": True, "queued": queued})
+
+
+@system_bp.route("/api/ledger/trim_silence", methods=["POST"])
+def api_ledger_trim_silence():
+    """Run manual silence trimming in the background for a specific downloaded lecture."""
+    import threading
+    from sp_sync.db.store import get_store
+    from sp_sync.sharepoint.ledger import resolve_ledger_path
+    from sp_sync.sharepoint.naming import is_video_name
+
+    data = _request_json()
+    key = (data.get("item_key") or "").strip()
+    if not key:
+        return _json_error("item_key is required", 400, code="MISSING_ITEM_KEY")
+
+    entry = get_store().ledger_get(key)
+    if not entry:
+        return _json_error("Ledger entry not found", 404, code="LEDGER_ENTRY_NOT_FOUND")
+
+    found = resolve_ledger_path(entry.get("local_path"))
+    if not found or not os.path.isfile(found):
+        return _json_error("Local video file is missing on disk.", 404, code="LOCAL_FILE_MISSING")
+    if not is_video_name(found):
+        return _json_error("Silence trimming applies only to video files.", 400, code="NOT_A_VIDEO")
+
+    with _trim_lock:
+        if key in _trimming_keys:
+            return _json_error("Silence trimming is already running for this file.", 409, code="TRIM_IN_PROGRESS")
+        _trimming_keys.add(key)
+
+    fname = os.path.basename(found)
+
+    def _run_trim():
+        try:
+            from sp_sync.sharepoint.silence_trim import silence_trim_settings, trim_silence_edges
+
+            add_log("system", f"✂️ Manual silence trim started: {fname}")
+            cfg = dict(silence_trim_settings())
+            cfg["enabled"] = True
+            ok = trim_silence_edges(found, log=lambda m: add_log("system", m), settings=cfg)
+            if ok:
+                add_log("system", f"✅ Manual silence trim finished: {fname}")
+            else:
+                add_log("system", f"⚠️ Manual silence trim could not process: {fname}")
+        except Exception as exc:
+            add_log("system", f"❌ Manual silence trim failed for {fname}: {exc}")
+        finally:
+            with _trim_lock:
+                _trimming_keys.discard(key)
+
+    threading.Thread(target=_run_trim, daemon=True, name="ManualSilenceTrim").start()
+    return jsonify({"success": True, "item_key": key, "file": fname})
+
+
+@system_bp.route("/api/ledger/untrimmed", methods=["GET"])
+def api_ledger_untrimmed_stats():
+    """Report count and disk size of safely removable ``*.untrimmed.mp4`` backups."""
+    return jsonify({"success": True, **scan_untrimmed_backups()})
+
+
+@system_bp.route("/api/ledger/cleanup_untrimmed", methods=["POST"])
+def api_ledger_cleanup_untrimmed():
+    """Safely delete ``*.untrimmed.mp4`` backups where a valid trimmed ``.mp4`` exists."""
+    res = cleanup_untrimmed_backups()
+    add_log("system", f"🧹 Cleaned {res['removed']} .untrimmed.mp4 backup(s), freed {res['freed_mb']} MB")
+    return jsonify({"success": True, **res})
+
+
+@system_bp.route("/api/notifications/telegram", methods=["GET", "POST"])
+def api_notifications_telegram():
+    """Read (masked) or update encrypted Telegram notification settings."""
+    from sp_sync.notifications.telegram import get_telegram_settings, save_telegram_settings
+
+    if request.method == "POST":
+        data = _request_json()
+        try:
+            saved = save_telegram_settings(data)
+        except ValueError as exc:
+            return _json_error(str(exc), 400, code="INVALID_TELEGRAM_SETTINGS")
+        except Exception as exc:
+            return _json_error(str(exc), 500, code="TELEGRAM_SAVE_FAILED")
+        add_log("system", f"🔔 Telegram notifications {'enabled' if saved['enabled'] else 'disabled'}.")
+        return jsonify({"success": True, "settings": saved})
+
+    return jsonify({"success": True, "settings": get_telegram_settings(masked=True)})
+
+
+@system_bp.route("/api/notifications/telegram/test", methods=["POST"])
+def api_notifications_telegram_test():
+    """Send a live test message to verify Telegram Bot Token & Chat ID."""
+    from sp_sync.notifications.telegram import test_telegram_connection
+
+    data = _request_json()
+    tok = (data.get("bot_token") or "").strip() or None
+    cid = (data.get("chat_id") or "").strip() or None
+    ok, msg = test_telegram_connection(bot_token=tok, chat_id=cid)
+    if ok:
+        add_log("system", "✅ Telegram test notification delivered.")
+        return jsonify({"success": True, "message": msg})
+    return _json_error(msg, 400, code="TELEGRAM_TEST_FAILED")
 
 
 @system_bp.route("/api/app_settings", methods=["GET", "POST"])

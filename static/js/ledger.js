@@ -92,6 +92,10 @@
           ${st.pending_redownload ? `<span class="badge badge-ok">🔁 ${st.pending_redownload}</span>` : ""}
         `;
       }
+      const redlMissingBtn = document.getElementById("btn-ledger-redl-missing");
+      if (redlMissingBtn) {
+        redlMissingBtn.style.display = st.missing_count > 0 ? "inline-flex" : "none";
+      }
 
       const groups = data.groups || [];
       if (!groups.length) {
@@ -138,6 +142,7 @@
                   <td>
                     <div class="toolbar-row">
                       ${actionBtn}
+                      ${it.local_exists ? `<button type="button" class="btn btn-outline btn-small" data-ledger-action="trim" data-key="${esc(it.item_key)}" title="${esc(SyncApp.t("trimSilenceBtn"))}">✂️</button>` : ""}
                       <button type="button" class="btn btn-danger btn-small" data-ledger-action="delete" data-key="${esc(it.item_key)}" title="${esc(SyncApp.t("ledgerBtnDelete"))}">🗑️</button>
                     </div>
                   </td>
@@ -187,15 +192,65 @@
     }
   }
 
+  async function refreshUntrimmedBadge() {
+    const btn = document.getElementById("btn-ledger-clean-untrimmed");
+    const lbl = document.getElementById("ledger-untrimmed-label");
+    if (!btn || !lbl) return;
+    try {
+      const { ok, data } = await SyncApp.api("/api/ledger/untrimmed");
+      if (ok && data.success && data.files > 0) {
+        btn.style.display = "inline-flex";
+        btn.dataset.files = String(data.files);
+        btn.dataset.mb = String(data.size_mb);
+        lbl.textContent = `${SyncApp.t("cleanUntrimmed")} (${data.files} • ${data.size_mb} MB)`;
+      } else {
+        btn.style.display = "none";
+      }
+    } catch (_) {}
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     applyCollapseStateToDom(false);
+    refreshUntrimmedBadge();
 
     const debouncedLoad = SyncApp.debounce(loadLedger, 220);
     document.getElementById("ledger-search")?.addEventListener("input", debouncedLoad);
     document.getElementById("ledger-status-filter")?.addEventListener("change", loadLedger);
-    document.getElementById("btn-ledger-refresh")?.addEventListener("click", loadLedger);
+    document.getElementById("btn-ledger-refresh")?.addEventListener("click", () => {
+      loadLedger();
+      refreshUntrimmedBadge();
+    });
     document.getElementById("btn-ledger-expand-all")?.addEventListener("click", () => setAllCollapsed(false));
     document.getElementById("btn-ledger-collapse-all")?.addEventListener("click", () => setAllCollapsed(true));
+
+    document.getElementById("btn-ledger-redl-missing")?.addEventListener("click", async () => {
+      const yes = await SyncApp.confirm("Queue all missing lectures for priority re-download on the next sync?");
+      if (!yes) return;
+      const { ok, data } = await SyncApp.api("/api/ledger/redownload_missing", { method: "POST" });
+      if (ok && data.success) {
+        SyncApp.toast(`🔁 Queued ${data.queued} missing lecture(s) for priority re-download`, "success");
+        loadLedger();
+      } else {
+        SyncApp.toast(data.error || "Action failed", "error");
+      }
+    });
+
+    document.getElementById("btn-ledger-clean-untrimmed")?.addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      const files = btn.dataset.files || "0";
+      const mb = btn.dataset.mb || "0";
+      const yes = await SyncApp.confirm(
+        `Delete ${files} .untrimmed.mp4 backup file(s) (${mb} MB)? Only backups with a valid trimmed .mp4 copy are removed.`
+      );
+      if (!yes) return;
+      const { ok, data } = await SyncApp.api("/api/ledger/cleanup_untrimmed", { method: "POST" });
+      if (ok && data.success) {
+        SyncApp.toast(`🧹 Removed ${data.removed} backup(s), freed ${data.freed_mb} MB`, "success");
+        refreshUntrimmedBadge();
+      } else {
+        SyncApp.toast(data.error || "Cleanup failed", "error");
+      }
+    });
 
     const container = document.getElementById("ledger-groups-container");
     container?.addEventListener("click", async (e) => {
@@ -233,6 +288,19 @@
           loadLedger();
         } else {
           SyncApp.toast(data.error || "Action failed", "error");
+        }
+      } else if (action === "trim") {
+        const yes = await SyncApp.confirm("Run leading/trailing silence trimming on this lecture in the background?");
+        if (!yes) return;
+        const { ok, data } = await SyncApp.api("/api/ledger/trim_silence", {
+          method: "POST",
+          body: { item_key: key },
+        });
+        if (ok && data.success) {
+          SyncApp.toast(`✂️ Silence trimming started for ${data.file} (check Activity Log)`, "success");
+          setTimeout(refreshUntrimmedBadge, 5000);
+        } else {
+          SyncApp.toast(data.error || "Could not start silence trim", "error");
         }
       } else if (action === "delete") {
         const yes = await SyncApp.confirm("Remove this item from the download ledger? (Does not delete the local file.)");

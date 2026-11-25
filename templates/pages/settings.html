@@ -248,6 +248,56 @@
       </form>
     </div>
 
+    <!-- Telegram Notifications (Encrypted in SQLite Vault) -->
+    <div class="card">
+      <div class="card-header-row">
+        <div class="card-header">📲 <span data-i18n="setTgTitle">Telegram Notifications</span></div>
+        <span class="badge {{ 'badge-ok' if telegram_settings and telegram_settings.enabled else '' }}" id="tg-status-badge">
+          {{ 'Enabled' if telegram_settings and telegram_settings.enabled else 'Off' }}
+        </span>
+      </div>
+      <form id="form-telegram-settings">
+        <div class="form-grid">
+          <div class="form-group full">
+            <label class="checkbox-row">
+              <input type="checkbox" id="tg-enabled" {% if telegram_settings and telegram_settings.enabled %}checked{% endif %}>
+              <strong data-i18n="setTgEnable">Send sync summaries & cookie alerts to Telegram</strong>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="tg-bot-token" data-i18n="setTgBotToken">Bot Token (encrypted at rest)</label>
+            <input type="password" class="form-input" id="tg-bot-token" dir="ltr" autocomplete="off"
+                   placeholder="{% if telegram_settings and telegram_settings.has_bot_token %}Saved ({{ telegram_settings.bot_token_hint }}) — paste to replace{% else %}123456789:ABCdef...{% endif %}">
+          </div>
+          <div class="form-group">
+            <label for="tg-chat-id" data-i18n="setTgChatId">Chat ID</label>
+            <input type="text" class="form-input" id="tg-chat-id" dir="ltr"
+                   value="{{ telegram_settings.chat_id if telegram_settings else '' }}" placeholder="e.g. 123456789">
+          </div>
+          <div class="form-group full">
+            <div class="toolbar-row" style="gap:16px;">
+              <label class="checkbox-row">
+                <input type="checkbox" id="tg-on-success" {% if not telegram_settings or telegram_settings.notify_on_success %}checked{% endif %}>
+                <span data-i18n="setTgOnSuccess">New downloads</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="tg-on-error" {% if not telegram_settings or telegram_settings.notify_on_error %}checked{% endif %}>
+                <span data-i18n="setTgOnError">Sync errors</span>
+              </label>
+              <label class="checkbox-row">
+                <input type="checkbox" id="tg-on-cookie" {% if not telegram_settings or telegram_settings.notify_on_cookie_expiry %}checked{% endif %}>
+                <span data-i18n="setTgOnCookie">Cookie expiry alerts</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn" data-i18n="setTgSave">Save Telegram</button>
+          <button type="button" class="btn btn-outline" id="btn-tg-test">📨 <span data-i18n="setTgTest">Send Test Message</span></button>
+        </div>
+      </form>
+    </div>
+
     <!-- Desktop Notifications -->
     <div class="card">
       <div class="card-header-row" style="margin:0;">

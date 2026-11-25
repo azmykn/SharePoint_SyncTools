@@ -280,6 +280,57 @@
     // Processing settings
     document.getElementById("form-app-settings")?.addEventListener("submit", saveAppSettings);
 
+    // Telegram notifications
+    document.getElementById("form-telegram-settings")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const payload = {
+        enabled: !!document.getElementById("tg-enabled")?.checked,
+        bot_token: (document.getElementById("tg-bot-token")?.value || "").trim(),
+        chat_id: (document.getElementById("tg-chat-id")?.value || "").trim(),
+        notify_on_success: !!document.getElementById("tg-on-success")?.checked,
+        notify_on_error: !!document.getElementById("tg-on-error")?.checked,
+        notify_on_cookie_expiry: !!document.getElementById("tg-on-cookie")?.checked,
+      };
+      const { ok, data } = await SyncApp.api("/api/notifications/telegram", { method: "POST", body: payload });
+      if (ok && data.success) {
+        const badge = document.getElementById("tg-status-badge");
+        if (badge) {
+          badge.className = "badge " + (data.settings.enabled ? "badge-ok" : "");
+          badge.textContent = data.settings.enabled ? SyncApp.t("enabled") : SyncApp.t("statusOff");
+        }
+        const tokInp = document.getElementById("tg-bot-token");
+        if (tokInp) {
+          tokInp.value = "";
+          if (data.settings.has_bot_token) {
+            tokInp.placeholder = `Saved (${data.settings.bot_token_hint}) — paste to replace`;
+          }
+        }
+        SyncApp.toast("✅ Telegram settings encrypted & saved", "success");
+      } else {
+        SyncApp.toast(data.error || "Could not save Telegram settings", "error");
+      }
+    });
+
+    document.getElementById("btn-tg-test")?.addEventListener("click", async () => {
+      const btn = document.getElementById("btn-tg-test");
+      if (btn) btn.disabled = true;
+      try {
+        const bot_token = (document.getElementById("tg-bot-token")?.value || "").trim();
+        const chat_id = (document.getElementById("tg-chat-id")?.value || "").trim();
+        const { ok, data } = await SyncApp.api("/api/notifications/telegram/test", {
+          method: "POST",
+          body: { bot_token, chat_id },
+        });
+        if (ok && data.success) {
+          SyncApp.toast("📨 Test message sent to Telegram!", "success");
+        } else {
+          SyncApp.toast(data.error || "Telegram test failed", "error");
+        }
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+
     // Validate all configs
     document.getElementById("btn-validate-configs")?.addEventListener("click", async () => {
       const box = document.getElementById("config-validation-output");

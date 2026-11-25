@@ -12,6 +12,7 @@
   let gdFolders = Array.isArray(window.__INITIAL_GD_FOLDERS__) ? window.__INITIAL_GD_FOLDERS__ : [];
   let spStateFilter = "all";
   let gdStateFilter = "all";
+  let spSelected = new Set();
   let spDragFrom = null;
   let gdDragFrom = null;
 
@@ -90,12 +91,53 @@
     openSPModal();
   }
 
+  function updateSpBulkBar() {
+    const bar = document.getElementById("sp-bulk-bar");
+    const cnt = document.getElementById("sp-bulk-count");
+    if (!bar || !cnt) return;
+    // Prune stale indices if list shrunk
+    spSelected.forEach((i) => { if (i < 0 || i >= spFolders.length) spSelected.delete(i); });
+    const n = spSelected.size;
+    bar.style.display = n > 0 ? "flex" : "none";
+    cnt.textContent = SyncApp.t("bulkSelectedCount", { n });
+  }
+
+  async function runSpBulkAction(action) {
+    const indices = Array.from(spSelected).sort((a, b) => a - b);
+    if (!indices.length) return;
+    const { ok, data } = await SyncApp.api("/sp/bulk_action", {
+      method: "POST",
+      body: { action, indices },
+    });
+    if (!ok || !data.success) {
+      SyncApp.toast(data.error || "Bulk action failed", "error");
+      return;
+    }
+    if (action === "sync") {
+      SyncApp.toast(`🔄 Sync started for ${data.count} selected target(s)`, "success");
+      SyncApp.pollLiveMetrics();
+    } else {
+      if (Array.isArray(data.configs)) spFolders = data.configs;
+      spSelected.clear();
+      const selAll = document.getElementById("sp-select-all-visible");
+      if (selAll) selAll.checked = false;
+      renderSPList();
+      SyncApp.toast(
+        action === "enable"
+          ? `▶ Enabled ${data.updated} target(s)`
+          : `⏸ Paused ${data.updated} target(s)`,
+        "success"
+      );
+    }
+  }
+
   function renderSPList() {
     const list = document.getElementById("sp-list");
     if (!list) return;
     const filterQ = (document.getElementById("sp-filter-input")?.value || "").trim().toLowerCase();
     const canDrag = !filterQ && spStateFilter === "all";
     updateSidebarBadges();
+    updateSpBulkBar();
     list.innerHTML = "";
 
     const rows = spFolders
@@ -115,6 +157,7 @@
 
     rows.forEach(({ f, idx }) => {
       const enabled = spEnabled(f);
+      const checked = spSelected.has(idx);
       const card = document.createElement("div");
       card.className = "item-card" + (enabled ? "" : " item-sync-off");
       card.draggable = canDrag;
@@ -131,6 +174,7 @@
       const stateBadge = enabled ? "" : `<span class="badge badge-warn">${esc(SyncApp.t("paused"))}</span>`;
 
       card.innerHTML = `
+        <input type="checkbox" class="sp-select-cb" data-idx="${idx}" ${checked ? "checked" : ""} aria-label="Select ${esc(f.name)}" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer;flex-shrink:0;">
         <span class="drag-handle" title="Drag to reorder" aria-hidden="true" style="${canDrag ? "" : "opacity:0.25;cursor:default;"}">⋮⋮</span>
         <div class="item-info">
           <div class="item-title">
@@ -442,6 +486,35 @@
     document.getElementById("btn-sp-browse-local")?.addEventListener("click", () => SyncApp.browseFolder("sp-path"));
     document.getElementById("btn-sp-sync")?.addEventListener("click", () => triggerSpSync({ dry_run: false }));
     document.getElementById("sp-filter-input")?.addEventListener("input", renderSPList);
+
+    // SharePoint Bulk selection & actions
+    document.getElementById("sp-select-all-visible")?.addEventListener("change", (e) => {
+      const check = !!e.target.checked;
+      document.querySelectorAll("#sp-list .sp-select-cb").forEach((cb) => {
+        const idx = parseInt(cb.getAttribute("data-idx"), 10);
+        cb.checked = check;
+        if (check) spSelected.add(idx);
+        else spSelected.delete(idx);
+      });
+      updateSpBulkBar();
+    });
+    document.getElementById("sp-list")?.addEventListener("change", (e) => {
+      const cb = e.target.closest(".sp-select-cb");
+      if (!cb) return;
+      const idx = parseInt(cb.getAttribute("data-idx"), 10);
+      if (cb.checked) spSelected.add(idx);
+      else spSelected.delete(idx);
+      updateSpBulkBar();
+    });
+    document.getElementById("btn-sp-bulk-enable")?.addEventListener("click", () => runSpBulkAction("enable"));
+    document.getElementById("btn-sp-bulk-disable")?.addEventListener("click", () => runSpBulkAction("disable"));
+    document.getElementById("btn-sp-bulk-sync")?.addEventListener("click", () => runSpBulkAction("sync"));
+    document.getElementById("btn-sp-bulk-clear")?.addEventListener("click", () => {
+      spSelected.clear();
+      const selAll = document.getElementById("sp-select-all-visible");
+      if (selAll) selAll.checked = false;
+      renderSPList();
+    });
 
     document.getElementById("sp-list")?.addEventListener("click", async (e) => {
       const btn = e.target.closest("[data-sp-action]");

@@ -23,8 +23,10 @@ KEY_SYNC_REPORT_SP = "sync_report_sharepoint"
 KEY_SYNC_REPORT_GD = "sync_report_gdrive"
 KEY_SYNC_REPORT_HISTORY = "sync_report_history"
 KEY_APP_SETTINGS = "app_settings_overrides"
+KEY_SP_COOKIE_HEALTH = "sharepoint_cookie_health"
+KEY_TELEGRAM_SETTINGS = "telegram_settings"
 
-_SECRET_KEYS = {KEY_SP_COOKIES, KEY_GDRIVE_TOKEN}
+_SECRET_KEYS = {KEY_SP_COOKIES, KEY_GDRIVE_TOKEN, KEY_TELEGRAM_SETTINGS}
 
 _lock = threading.RLock()
 _store_singleton: Optional["AppStore"] = None
@@ -287,6 +289,21 @@ class AppStore:
 
     def set_app_settings_overrides(self, overrides: dict) -> None:
         self.set_json(KEY_APP_SETTINGS, overrides if isinstance(overrides, dict) else {})
+
+    # ---------------- cookie health & notifications ----------------
+    def get_sp_cookie_health(self) -> dict:
+        data = self.get_json(KEY_SP_COOKIE_HEALTH, {})
+        return data if isinstance(data, dict) else {}
+
+    def set_sp_cookie_health(self, payload: dict) -> None:
+        self.set_json(KEY_SP_COOKIE_HEALTH, payload if isinstance(payload, dict) else {})
+
+    def get_telegram_settings_raw(self) -> dict:
+        data = self.get_json(KEY_TELEGRAM_SETTINGS, {})
+        return data if isinstance(data, dict) else {}
+
+    def set_telegram_settings_raw(self, payload: dict) -> None:
+        self.set_json(KEY_TELEGRAM_SETTINGS, payload if isinstance(payload, dict) else {})
 
     def get_sync_report(self, service: str) -> dict:
         """Get last sync report for a service ('sharepoint' or 'gdrive')."""

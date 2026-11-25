@@ -148,3 +148,82 @@ class CookieValidator:
                 "message": f"Connection test failed: {e}",
                 "error": str(e),
             }
+
+
+def record_cookie_health(status: str, message: str = "", user: str = "") -> dict:
+    """Persist cached SharePoint cookie health state ('ok', 'expired', or 'unknown') in SQLite."""
+    import time
+    from datetime import datetime
+
+    norm = status if status in ("ok", "expired", "unknown") else "unknown"
+    payload = {
+        "status": norm,
+        "message": str(message or ""),
+        "user": str(user or ""),
+        "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "checked_ts": time.time(),
+    }
+    try:
+        from sp_sync.db.store import get_store
+
+        get_store().set_sp_cookie_health(payload)
+    except Exception:
+        pass
+    return payload
+
+
+def get_cached_cookie_health() -> dict:
+    """Read last known SharePoint cookie health without performing any network calls."""
+    try:
+        from sp_sync.db.store import get_store
+
+        data = get_store().get_sp_cookie_health()
+        if isinstance(data, dict) and data.get("status"):
+            return data
+    except Exception:
+        pass
+    return {"status": "unknown", "message": "", "user": "", "checked_at": "", "checked_ts": 0.0}
+
+
+def check_sharepoint_cookie_health(
+    fedauth: str,
+    rtfa: str,
+    *,
+    force: bool = False,
+    max_age_sec: float = 3600.0,
+) -> dict:
+    """Check SharePoint cookie validity with TTL caching and zero false-positive network alarms."""
+    import time
+
+    if not fedauth or not rtfa:
+        return record_cookie_health("unknown", "SharePoint cookies are not configured.")
+
+    cached = get_cached_cookie_health()
+    now = time.time()
+    age = now - float(cached.get("checked_ts") or 0.0)
+    if not force and cached.get("status") in ("ok", "expired") and age < max_age_sec:
+        out = dict(cached)
+        out["cached"] = True
+        return out
+
+    validator = CookieValidator()
+    res = validator.test_cookie_connectivity(fedauth, rtfa)
+    if res.get("success"):
+        saved = record_cookie_health("ok", res.get("message", ""), res.get("user", ""))
+        saved["cached"] = False
+        return saved
+
+    # Only flag 'expired' on definite auth failures (not transient offline / DNS errors)
+    sc = res.get("status_code")
+    msg = str(res.get("message") or "")
+    low = msg.lower()
+    if sc in (301, 302, 303, 307, 308, 401, 403) or "expired" in low or "sign-in" in low or "rejected" in low:
+        saved = record_cookie_health("expired", msg)
+        saved["cached"] = False
+        return saved
+
+    # Transient network error: preserve previous status without false alarm
+    out = dict(cached)
+    out["message"] = msg or out.get("message", "")
+    out["cached"] = False
+    return out

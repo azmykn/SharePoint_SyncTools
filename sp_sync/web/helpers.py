@@ -606,12 +606,22 @@ def build_shell_context(active_page: str, page_title_key: str, **extra) -> Dict[
     except Exception:
         ledger_count = 0
 
+    cookie_health = {"status": "unknown", "message": "", "user": "", "checked_at": ""}
+    if fedauth and rtfa:
+        try:
+            from sp_sync.security.cookies import get_cached_cookie_health
+
+            cookie_health = get_cached_cookie_health()
+        except Exception:
+            pass
+
     ctx: Dict[str, Any] = {
         "active_page": active_page,
         "page_title_key": page_title_key,
         "fedauth_len": len(fedauth),
         "rtfa_len": len(rtfa),
         "sp_auth": bool(fedauth and rtfa),
+        "sp_cookie_health": cookie_health,
         "sp_total_count": len(sp_configs),
         "sp_active_count": sp_active_count,
         "gd_auth": gd_authenticated,
@@ -625,3 +635,73 @@ def build_shell_context(active_page: str, page_title_key: str, **extra) -> Dict[
     }
     ctx.update(extra)
     return ctx
+
+
+def _collect_untrimmed_backup_paths() -> List[Tuple[str, int]]:
+    """Find ``*.untrimmed.mp4`` backup files that have a valid paired trimmed ``.mp4`` next to them."""
+    from sp_sync.db.store import get_store
+    from sp_sync.sharepoint.naming import lecture_search_dirs
+
+    roots: set = set()
+    for cfg in load_sp_configs() + load_gdrive_configs():
+        lp = (cfg.get("local_path") or "").strip()
+        if lp:
+            p = os.path.abspath(os.path.expanduser(lp))
+            if os.path.isdir(p):
+                roots.add(p)
+    try:
+        for row in get_store().ledger_list():
+            ld = (row.get("local_dir") or "").strip()
+            if ld and os.path.isdir(ld):
+                for d in lecture_search_dirs(ld):
+                    if os.path.isdir(d):
+                        roots.add(os.path.abspath(d))
+    except Exception:
+        pass
+
+    found: Dict[str, int] = {}
+    suffix = ".untrimmed.mp4"
+    for root in sorted(roots):
+        for cur, _dirs, files in os.walk(root):
+            for fn in files:
+                if not fn.lower().endswith(suffix):
+                    continue
+                backup_path = os.path.abspath(os.path.join(cur, fn))
+                if backup_path in found:
+                    continue
+                paired_trimmed = os.path.join(cur, fn[: -len(suffix)] + ".mp4")
+                try:
+                    # Safety guard: ONLY consider deleting backup if paired trimmed video exists and is non-empty
+                    if os.path.isfile(paired_trimmed) and os.path.getsize(paired_trimmed) >= 1024 * 1024:
+                        found[backup_path] = os.path.getsize(backup_path)
+                except OSError:
+                    continue
+    return sorted(found.items())
+
+
+def scan_untrimmed_backups() -> Dict[str, Any]:
+    """Return count and total MB of safely removable ``*.untrimmed.mp4`` backup files."""
+    items = _collect_untrimmed_backup_paths()
+    total_bytes = sum(sz for _p, sz in items)
+    return {
+        "files": len(items),
+        "size_mb": round(total_bytes / (1024 * 1024), 2),
+    }
+
+
+def cleanup_untrimmed_backups() -> Dict[str, Any]:
+    """Safely delete ``*.untrimmed.mp4`` backups whose paired trimmed ``.mp4`` is present and valid."""
+    items = _collect_untrimmed_backup_paths()
+    removed = 0
+    freed = 0
+    for path, sz in items:
+        try:
+            os.remove(path)
+            removed += 1
+            freed += sz
+        except OSError:
+            pass
+    return {
+        "removed": removed,
+        "freed_mb": round(freed / (1024 * 1024), 2),
+    }

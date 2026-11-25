@@ -1,6 +1,7 @@
 # SharePoint sync + web UI
 requests>=2.31.0
 flask>=3.0.0
+waitress>=3.0.0
 playwright>=1.40.0
 imageio-ffmpeg>=0.5.1
 

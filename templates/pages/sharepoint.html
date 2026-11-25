@@ -31,13 +31,30 @@
   <div id="sp-view-targets" class="subview-panel {{ 'active' if initial_view != 'explorer' else '' }}">
     <div class="card">
       <div class="card-header-row">
-        <div class="pill-group" id="sp-state-filter">
-          <button type="button" class="pill-btn active" data-state="all" data-i18n="filterAll">All</button>
-          <button type="button" class="pill-btn" data-state="active" data-i18n="active">Active</button>
-          <button type="button" class="pill-btn" data-state="paused" data-i18n="paused">Paused</button>
+        <div class="toolbar-row">
+          <label class="checkbox-row" style="font-size:0.82rem;">
+            <input type="checkbox" id="sp-select-all-visible">
+            <span data-i18n="selectVisible">Select</span>
+          </label>
+          <div class="pill-group" id="sp-state-filter">
+            <button type="button" class="pill-btn active" data-state="all" data-i18n="filterAll">All</button>
+            <button type="button" class="pill-btn" data-state="active" data-i18n="active">Active</button>
+            <button type="button" class="pill-btn" data-state="paused" data-i18n="paused">Paused</button>
+          </div>
         </div>
-        <input type="text" id="sp-filter-input" class="form-input" style="width:260px;padding:6px 10px;" data-i18n-placeholder="searchFoldersPh" placeholder="Filter targets...">
+        <input type="text" id="sp-filter-input" class="form-input" style="width:250px;padding:6px 10px;" data-i18n-placeholder="searchFoldersPh" placeholder="Filter targets...">
       </div>
+
+      <!-- Contextual Bulk Action Bar (appears when 1+ targets are checked) -->
+      <div id="sp-bulk-bar" class="toolbar-row" style="display:none;padding:8px 12px;margin-bottom:12px;border-radius:8px;background:var(--accent-soft);border:1px solid rgba(59,130,246,0.35);">
+        <strong id="sp-bulk-count" style="font-size:0.85rem;">0 selected</strong>
+        <button type="button" class="btn btn-outline btn-small" id="btn-sp-bulk-enable">▶ <span data-i18n="bulkEnable">Enable</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-sp-bulk-disable">⏸ <span data-i18n="bulkPause">Pause</span></button>
+        <button type="button" class="btn btn-success btn-small" id="btn-sp-bulk-sync">🔄 <span data-i18n="bulkSyncSelected">Sync Selected</span></button>
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-outline btn-small" id="btn-sp-bulk-clear">✕</button>
+      </div>
+
       <p class="muted" style="margin-bottom:12px;" data-i18n="spSyncOrderHint">
         Drag rows to set sync order (top runs first). Paused targets stay saved and are skipped.
       </p>
