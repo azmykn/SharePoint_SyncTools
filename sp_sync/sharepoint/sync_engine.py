@@ -1987,6 +1987,236 @@ def sync_sharepoint_single_file(
         session.close()
 
 
+def _is_video_filename(name: str) -> bool:
+    ext = os.path.splitext(name or "")[1].lower()
+    return ext == ".mp4" or ext in VIDEO_EXTENSIONS
+
+
+def _config_matches_ledger_entry(cfg: dict, entry: dict) -> bool:
+    """Return True if *entry* (from downloaded_files) belongs to SharePoint *cfg*."""
+    cfg_rel = (cfg.get("rel_url") or "").strip().rstrip("/").lower()
+    ent_rel = (entry.get("rel_url") or "").strip().rstrip("/").lower()
+    if cfg_rel and ent_rel:
+        if ent_rel == cfg_rel or ent_rel.startswith(cfg_rel + "/"):
+            return True
+
+    cfg_local = (cfg.get("local_path") or "").strip()
+    ent_local = (entry.get("local_path") or entry.get("local_dir") or "").strip()
+    if cfg_local and ent_local:
+        try:
+            c_abs = os.path.abspath(os.path.expanduser(cfg_local))
+            e_abs = os.path.abspath(os.path.expanduser(ent_local))
+            if os.path.commonpath([c_abs, e_abs]) == c_abs:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _entry_download_dir(entry: dict, matched_cfg: Optional[dict]) -> str:
+    """Resolve the base subject download_dir for a ledger entry (avoiding double ``تسجيلات``)."""
+    from sp_sync.sharepoint.naming import subject_dir
+
+    local_dir = (entry.get("local_dir") or "").strip()
+    if not local_dir and entry.get("local_path"):
+        local_dir = os.path.dirname(os.path.abspath(entry["local_path"]))
+    if local_dir:
+        return subject_dir(local_dir)
+    if matched_cfg and matched_cfg.get("local_path"):
+        return os.path.abspath(os.path.expanduser(matched_cfg["local_path"]))
+    return os.getcwd()
+
+
+def process_priority_redownloads(
+    fedauth_cookie: str,
+    rtfa_cookie: str,
+    sp_site_url: str,
+    configs: List[dict],
+    log_callback=None,
+    *,
+    only_config: Optional[dict] = None,
+    cancel_event: Optional[threading.Event] = None,
+    dry_run: bool = False,
+    keep_browser_open: bool = True,
+    stats: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Execute ``🔁 Queued for Re-download`` items FIRST before scanning regular folders.
+
+    Items with a known ``rel_url`` are downloaded directly in priority order (even if their
+    parent folder is paused or appears late in the folder list). Any pending item without a
+    ``rel_url`` is skipped here so the regular folder scan picks it up with priority.
+    """
+    def log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+        else:
+            print(msg)
+
+    store = get_store()
+    pending = store.ledger_pending_redownloads()
+    if not pending:
+        return 0
+
+    if only_config is not None:
+        pending = [e for e in pending if _config_matches_ledger_entry(only_config, e)]
+    actionable = [e for e in pending if (e.get("rel_url") or "").strip()]
+    if not actionable:
+        return 0
+
+    if not validate_cookies_before_sync(fedauth_cookie, rtfa_cookie, log):
+        log("❌ Cookie validation failed. Skipping priority re-downloads.")
+        return 0
+
+    log(f"🔁 Priority re-download queue: {len(actionable)} item(s) — processing BEFORE regular folder scan")
+
+    from sp_sync.sharepoint import ledger as _ledger
+
+    session = None if dry_run else _build_rest_session(fedauth_cookie, rtfa_cookie, sp_site_url)
+    base = (sp_site_url or get_sp_site_url()).rstrip("/")
+    guest = load_guest_link().strip()
+    warmed_links: set = set()
+    share_root_cache: Dict[str, str] = {}
+    page_holder: Dict[str, Any] = {"page": None, "attempted": False}
+    active_share_hint = {"url": guest}
+
+    def lazy_page_factory():
+        if page_holder["page"] is not None:
+            return page_holder["page"]
+        if page_holder["attempted"]:
+            return None
+        page_holder["attempted"] = True
+        page_holder["page"] = _get_playwright_page(
+            fedauth_cookie=fedauth_cookie,
+            rtfa_cookie=rtfa_cookie,
+            sp_site_url=sp_site_url,
+            guest_link_url=active_share_hint["url"] or guest,
+            session=session,
+            log=log,
+        )
+        return page_holder["page"]
+
+    downloaded_count = 0
+    try:
+        for idx, entry in enumerate(actionable, start=1):
+            if cancel_event and cancel_event.is_set():
+                log("🛑 Priority re-download cancelled by user.")
+                if stats is not None:
+                    stats["cancelled"] = True
+                break
+
+            rel_url = (entry.get("rel_url") or "").strip()
+            name = (entry.get("original_name") or "").strip() or os.path.basename(rel_url.rstrip("/"))
+            sz = _coerce_int(entry.get("size"), 0)
+
+            matched_cfg = only_config
+            if matched_cfg is None:
+                for cfg in configs or []:
+                    if _config_matches_ledger_entry(cfg, entry):
+                        matched_cfg = cfg
+                        break
+
+            download_dir = _entry_download_dir(entry, matched_cfg)
+            row = {
+                "item_id": entry.get("item_id"),
+                "rel_url": rel_url,
+                "name": name,
+                "size": sz,
+                "modified": entry.get("modified"),
+            }
+
+            plan_meta: Dict[str, Any] = {}
+            local_path = _ledger.plan_download(
+                store, download_dir, row, log=log, dry_run=dry_run, out_meta=plan_meta
+            )
+            if not local_path:
+                continue
+
+            if dry_run:
+                log(f"[DRY-RUN] 🔁 Priority re-download [{idx}/{len(actionable)}]: '{name}' -> {local_path}")
+                if stats is not None:
+                    stats.setdefault("planned_files", []).append(
+                        {"name": name, "local_path": local_path, "size": sz, "priority_redownload": True}
+                    )
+                downloaded_count += 1
+                continue
+
+            log(f"🔁 Priority re-download [{idx}/{len(actionable)}]: '{name}'...")
+            cfg_share = ((matched_cfg or {}).get("sharing_link") or "").strip()
+            share_u = ""
+            if _sp_sharing_url_has_stream_path(cfg_share):
+                share_u = cfg_share
+            elif _sp_sharing_url_has_stream_path(guest):
+                share_u = guest
+            active_share_hint["url"] = share_u or guest
+
+            share_root = ""
+            if share_u:
+                if share_u not in share_root_cache:
+                    rp, _st = _sp_resolve_via_v2_share_driveitem(session, share_u)
+                    share_root_cache[share_u] = rp or ""
+                share_root = share_root_cache[share_u]
+
+            warm_target = share_u or (base + "/")
+            if warm_target.startswith("http") and warm_target not in warmed_links:
+                prime_sharepoint_session_for_browse(
+                    session,
+                    base,
+                    prime_url=warm_target,
+                    fedauth_cookie=fedauth_cookie,
+                    rtfa_cookie=rtfa_cookie,
+                )
+                warmed_links.add(warm_target)
+
+            existed_before = os.path.isfile(local_path)
+            got = _download_one_file(
+                session,
+                page_holder["page"],
+                sp_site_url,
+                rel_url,
+                local_path,
+                log,
+                allow_non_mp4=True,
+                sharing_link_url=share_u or None,
+                item_id=entry.get("item_id"),
+                share_root_norm=share_root or None,
+                remote_size=sz,
+                cancel_event=cancel_event,
+                page_factory=lazy_page_factory,
+            )
+            downloaded_count += got
+
+            if not got and plan_meta.get("aside_path"):
+                _ledger.restore_redownload_aside(local_path, plan_meta["aside_path"], log=log)
+
+            try:
+                _ledger.record_after_download(
+                    store,
+                    row,
+                    local_path,
+                    got,
+                    existed_before,
+                    is_valid=lambda p: (not _ledger.is_video_name(p))
+                    or (_is_valid_mp4(p) and os.path.getsize(p) >= 1024 * 1024),
+                )
+            except Exception as exc:
+                log(f"  ⚠️ Could not update ledger for '{name}': {exc}")
+
+            if stats is not None:
+                if got:
+                    stats["downloaded"] = int(stats.get("downloaded", 0)) + 1
+                    stats.setdefault("new_files", []).append(os.path.basename(local_path))
+                elif not (cancel_event and cancel_event.is_set()):
+                    stats["failed"] = int(stats.get("failed", 0)) + 1
+                    stats.setdefault("errors", []).append(f"Priority re-download failed: {name}")
+    finally:
+        if session is not None:
+            session.close()
+        if not keep_browser_open:
+            _cleanup_playwright()
+
+    return downloaded_count
+
+
 def _sync_folder_recursive(
     session,
     page,
@@ -2079,29 +2309,96 @@ def _sync_folder_recursive(
         return 0
 
     method = listing.get("method") or "rest"
-    n_f = len(listing.get("folders") or [])
-    n_files = len(listing.get("files") or [])
-    ext_counts: Dict[str, int] = {}
-    for _row in listing.get("files") or []:
-        _ext = os.path.splitext(_row.get("name") or "")[1].lower() or "(none)"
-        ext_counts[_ext] = ext_counts.get(_ext, 0) + 1
-    _types = ", ".join(f"{n} {ext}" for ext, n in sorted(ext_counts.items()))
-    if _types:
-        log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s) ({_types})")
-    else:
-        log(f"📋 Listed via {method}: {n_f} folder(s), {n_files} file(s)")
+    raw_files = listing.get("files") or []
+    raw_folders = listing.get("folders") or []
+
+    # 1) Pre-filter excluded subfolders up front (Forms, _-prefixed, incomplete rows)
+    valid_folders = [
+        f
+        for f in raw_folders
+        if (f.get("name") or "")
+        and (f.get("rel_url") or "")
+        and f.get("name") != "Forms"
+        and not str(f.get("name")).startswith("_")
+    ]
+
+    # 2) Pre-filter excluded file types up front (never backfill/plan/download non-video files when video_only=True)
+    candidate_files = []
+    excluded_type_count = 0
+    for file_row in raw_files:
+        name = file_row.get("name") or ""
+        rel_url = file_row.get("rel_url") or ""
+        if not name or not rel_url:
+            continue
+        if not allow_non_mp4 and not _is_video_filename(name):
+            excluded_type_count += 1
+            continue
+        candidate_files.append(file_row)
 
     downloaded_count = 0
     from sp_sync.sharepoint import ledger as _ledger
 
     _store = get_store()
-    if not dry_run:
-        try:
-            _ledger.backfill_folder(_store, download_dir, listing.get("files") or [], log=log)
-        except Exception as exc:
-            log(f"  ⚠️ Ledger backfill failed: {exc}")
 
-    for file_row in listing.get("files") or []:
+    # 3) Single batch ledger load + backfill ONLY on non-excluded files not yet in ledger
+    ledger_by_key = _store.ledger_map()
+    if not dry_run and candidate_files:
+        untracked = [r for r in candidate_files if _ledger._row_key(r) not in ledger_by_key]
+        if untracked:
+            try:
+                recorded = _ledger.backfill_folder(_store, download_dir, untracked, log=log)
+                if recorded:
+                    ledger_by_key = _store.ledger_map()
+            except Exception as exc:
+                log(f"  ⚠️ Ledger backfill failed: {exc}")
+
+    # 4) Partition UP FRONT: Priority Re-downloads -> New Files (skip already-downloaded up front!)
+    redownload_queue = []
+    new_queue = []
+    skipped_ledger_count = 0
+    for file_row in candidate_files:
+        key = _ledger._row_key(file_row)
+        entry = ledger_by_key.get(key) if key else None
+        if entry:
+            if entry.get("redownload_requested"):
+                redownload_queue.append(file_row)
+            else:
+                skipped_ledger_count += 1
+        else:
+            new_queue.append(file_row)
+
+    if stats is not None:
+        stats["skipped"] = int(stats.get("skipped", 0)) + skipped_ledger_count + excluded_type_count
+
+    work_queue = redownload_queue + new_queue
+
+    # 5) Single concise summary log instead of per-file skip spam
+    skip_parts = []
+    if skipped_ledger_count:
+        skip_parts.append(f"{skipped_ledger_count} in ledger")
+    if excluded_type_count:
+        skip_parts.append(f"{excluded_type_count} excluded type")
+    skip_note = f" (filtered out: {', '.join(skip_parts)})" if skip_parts else ""
+
+    if work_queue:
+        q_parts = []
+        if redownload_queue:
+            q_parts.append(f"{len(redownload_queue)} 🔁 re-download")
+        if new_queue:
+            q_parts.append(f"{len(new_queue)} new")
+        log(
+            f"📋 Queue ({method}): {', '.join(q_parts)}"
+            + (f", {len(valid_folders)} subfolder(s)" if valid_folders else "")
+            + skip_note
+        )
+    else:
+        log(
+            f"✓ Up to date ({method})"
+            + (f", {len(valid_folders)} subfolder(s)" if valid_folders else "")
+            + skip_note
+        )
+
+    for file_row in work_queue:
         if cancel_event and cancel_event.is_set():
             log("🛑 SharePoint sync cancelled by user.")
             if stats is not None:
@@ -2110,8 +2407,6 @@ def _sync_folder_recursive(
 
         name = file_row.get("name") or ""
         rel_url = file_row.get("rel_url") or ""
-        if not name or not rel_url:
-            continue
         file_item_id = file_row.get("item_id")
         sz = _coerce_int(file_row.get("size"), 0)
 
@@ -2125,16 +2420,12 @@ def _sync_folder_recursive(
             continue
 
         if dry_run:
-            ext = os.path.splitext(name)[1].lower()
-            is_vid = ext == ".mp4" or ext in VIDEO_EXTENSIONS
-            if not allow_non_mp4 and not is_vid:
-                if stats is not None:
-                    stats["skipped"] = int(stats.get("skipped", 0)) + 1
-                continue
-            log(f"[DRY-RUN] Would download '{name}' -> {local_path} ({sz/1024/1024:.1f} MB)")
+            is_redl = file_row in redownload_queue
+            tag = "🔁 [DRY-RUN]" if is_redl else "[DRY-RUN]"
+            log(f"{tag} Would download '{name}' -> {local_path} ({sz/1024/1024:.1f} MB)")
             if stats is not None:
                 stats.setdefault("planned_files", []).append(
-                    {"name": name, "local_path": local_path, "size": sz}
+                    {"name": name, "local_path": local_path, "size": sz, "priority_redownload": is_redl}
                 )
             downloaded_count += 1
             continue
@@ -2180,25 +2471,16 @@ def _sync_folder_recursive(
             elif existed_before:
                 stats["skipped"] = int(stats.get("skipped", 0)) + 1
             elif not (cancel_event and cancel_event.is_set()):
-                ext = os.path.splitext(name)[1].lower()
-                is_vid = ext == ".mp4" or ext in VIDEO_EXTENSIONS
-                if allow_non_mp4 or is_vid:
-                    stats["failed"] = int(stats.get("failed", 0)) + 1
-                    stats.setdefault("errors", []).append(f"Failed download: {name}")
-                else:
-                    stats["skipped"] = int(stats.get("skipped", 0)) + 1
+                stats["failed"] = int(stats.get("failed", 0)) + 1
+                stats.setdefault("errors", []).append(f"Failed download: {name}")
 
-    for folder_row in listing.get("folders") or []:
+    for folder_row in valid_folders:
         if cancel_event and cancel_event.is_set():
             if stats is not None:
                 stats["cancelled"] = True
             break
         folder_name = folder_row.get("name") or ""
         sub_rel_url = folder_row.get("rel_url") or ""
-        if not folder_name or not sub_rel_url:
-            continue
-        if folder_name == "Forms" or folder_name.startswith("_"):
-            continue
         safe_sub = _sanitize_dir_name(folder_name)
         sub_dir = os.path.join(download_dir, safe_sub)
         log(f"\n📁 {folder_name}")

@@ -192,6 +192,36 @@ class TestSystemAndNewRoutes(unittest.TestCase):
         self.assertEqual(redir.status_code, 302)
         self.assertTrue(redir.headers["Location"].endswith("/sharepoint"))
 
+    def test_ledger_groups_follow_configured_sync_order(self):
+        from sp_sync.db.store import get_store
+
+        d_zebra = os.path.join(self.tmp.name, "Zebra Course")
+        d_alpha = os.path.join(self.tmp.name, "Alpha Course")
+        os.makedirs(d_zebra)
+        os.makedirs(d_alpha)
+        p_z = os.path.join(d_zebra, "Zebra_2026-10-01_01.mp4")
+        p_a = os.path.join(d_alpha, "Alpha_2026-10-01_01.mp4")
+        with open(p_z, "wb") as f:
+            f.write(b"z")
+        with open(p_a, "wb") as f:
+            f.write(b"a")
+
+        st = get_store()
+        # Configure Zebra FIRST (#1) and Alpha SECOND (#2) — opposite of alphabetical order!
+        st.set_sharepoint_configs(
+            [
+                {"name": "Zebra", "rel_url": "/personal/u/Documents/Zebra", "local_path": d_zebra, "sync_enabled": True},
+                {"name": "Alpha", "rel_url": "/personal/u/Documents/Alpha", "local_path": d_alpha, "sync_enabled": False},
+            ]
+        )
+        st.ledger_record(item_id="Z1", rel_url="/personal/u/Documents/Zebra/z.mp4", original_name="z.mp4", local_path=p_z, size=10)
+        st.ledger_record(item_id="A1", rel_url="/personal/u/Documents/Alpha/a.mp4", original_name="a.mp4", local_path=p_a, size=10)
+
+        groups = self.client.get("/api/ledger").get_json()["groups"]
+        self.assertEqual([g["subject"] for g in groups], ["Zebra Course", "Alpha Course"])
+        self.assertEqual([g["sync_order"] for g in groups], [1, 2])
+        self.assertEqual([g["sync_enabled"] for g in groups], [True, False])
+
 
 if __name__ == "__main__":
     unittest.main()

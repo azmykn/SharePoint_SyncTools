@@ -727,51 +727,69 @@ def sync_gdrive_folder(
     downloaded_count = 0
     indent = "  " * depth
 
+    # Pre-filter up front: separate subfolders, actionable files, and already-synced files
+    subfolders = []
+    work_items = []
+    skipped_existing = 0
+
     for item in items:
+        file_id = item.get("id")
+        if not file_id:
+            continue
+        name = item.get("name") or "Untitled"
+        mime_type = item.get("mimeType") or ""
+        safe_name = _safe_local_name(name)
+
+        if mime_type == FOLDER_MIME:
+            subfolders.append((file_id, safe_name))
+            continue
+
+        if mime_type in GOOGLE_DOCS_EXPORT:
+            export_mime, ext = GOOGLE_DOCS_EXPORT[mime_type]
+            out_name = safe_name if safe_name.lower().endswith(ext) else (safe_name + ext)
+            local_path = _safe_child_path(local_dir, out_name)
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                skipped_existing += 1
+                continue
+            work_items.append(("export", file_id, out_name, local_path, export_mime, 0))
+            continue
+
+        local_path = _safe_child_path(local_dir, safe_name)
+        try:
+            remote_size = int(item.get("size", 0) or 0)
+        except (TypeError, ValueError):
+            remote_size = 0
+        if os.path.exists(local_path):
+            local_sz = os.path.getsize(local_path)
+            if (remote_size > 0 and local_sz == remote_size) or (remote_size == 0 and local_sz > 0):
+                skipped_existing += 1
+                continue
+        work_items.append(("file", file_id, safe_name, local_path, mime_type, remote_size))
+
+    if stats is not None and skipped_existing:
+        stats["skipped"] = int(stats.get("skipped", 0)) + skipped_existing
+
+    if work_items:
+        log(
+            f"{indent}📋 Queue: {len(work_items)} file(s)"
+            + (f", {len(subfolders)} subfolder(s)" if subfolders else "")
+            + (f" (filtered out: {skipped_existing} already on disk)" if skipped_existing else "")
+        )
+    elif skipped_existing:
+        log(
+            f"{indent}✓ Up to date"
+            + (f", {len(subfolders)} subfolder(s)" if subfolders else "")
+            + f" ({skipped_existing} already on disk)"
+        )
+
+    for kind, file_id, safe_name, local_path, mime_or_export, remote_size in work_items:
         if cancel_event and cancel_event.is_set():
             log(f"{indent}🛑 Google Drive sync cancelled.")
             if stats is not None:
                 stats["cancelled"] = True
             break
 
-        name = item.get("name") or "Untitled"
-        mime_type = item.get("mimeType") or ""
-        file_id = item.get("id")
-        if not file_id:
-            continue
-
-        safe_name = _safe_local_name(name)
-
-        if mime_type == FOLDER_MIME:
-            sub_dir = _safe_child_path(local_dir, safe_name)
-            log(f"{indent}📁 {safe_name}/")
-            downloaded_count += sync_gdrive_folder(
-                creds,
-                file_id,
-                sub_dir,
-                log_callback,
-                depth + 1,
-                visited_folders=visited,
-                cancel_event=cancel_event,
-                dry_run=dry_run,
-                stats=stats,
-                _service=service,
-            )
-            continue
-
-        # Handle Google Docs / Sheets / Slides exports
-        if mime_type in GOOGLE_DOCS_EXPORT:
-            export_mime, ext = GOOGLE_DOCS_EXPORT[mime_type]
-            if not safe_name.lower().endswith(ext):
-                safe_name = safe_name + ext
-            local_path = _safe_child_path(local_dir, safe_name)
-
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                log(f"{indent}[-] Skipping '{safe_name}' (exists)")
-                if stats is not None:
-                    stats["skipped"] = int(stats.get("skipped", 0)) + 1
-                continue
-
+        if kind == "export":
             if dry_run:
                 log(f"{indent}[DRY-RUN] Would export '{safe_name}'")
                 if stats is not None:
@@ -783,7 +801,7 @@ def sync_gdrive_folder(
             part_path = local_path + ".part"
             start_file_progress(os.path.basename(local_dir), safe_name, 0, service="gdrive")
             try:
-                request = service.files().export_media(fileId=file_id, mimeType=export_mime)
+                request = service.files().export_media(fileId=file_id, mimeType=mime_or_export)
                 with io.FileIO(part_path, "wb") as fh:
                     downloader = MediaIoBaseDownload(fh, request, chunksize=4 * 1024 * 1024)
                     done = False
@@ -825,26 +843,6 @@ def sync_gdrive_folder(
                     except Exception:
                         pass
             continue
-
-        # Regular file download
-        local_path = _safe_child_path(local_dir, safe_name)
-        try:
-            remote_size = int(item.get("size", 0) or 0)
-        except (TypeError, ValueError):
-            remote_size = 0
-
-        if os.path.exists(local_path):
-            local_sz = os.path.getsize(local_path)
-            if remote_size > 0 and local_sz == remote_size:
-                log(f"{indent}[-] Skipping '{safe_name}' (exists, {local_sz/1024/1024:.1f} MB)")
-                if stats is not None:
-                    stats["skipped"] = int(stats.get("skipped", 0)) + 1
-                continue
-            elif remote_size == 0 and local_sz > 0:
-                log(f"{indent}[-] Skipping '{safe_name}' (exists)")
-                if stats is not None:
-                    stats["skipped"] = int(stats.get("skipped", 0)) + 1
-                continue
 
         sz_mb = remote_size / (1024 * 1024) if remote_size else 0
         if dry_run:
@@ -912,6 +910,26 @@ def sync_gdrive_folder(
                     os.remove(part_path)
                 except Exception:
                     pass
+
+    for sub_id, sub_name in subfolders:
+        if cancel_event and cancel_event.is_set():
+            if stats is not None:
+                stats["cancelled"] = True
+            break
+        sub_dir = _safe_child_path(local_dir, sub_name)
+        log(f"{indent}📁 {sub_name}/")
+        downloaded_count += sync_gdrive_folder(
+            creds,
+            sub_id,
+            sub_dir,
+            log_callback,
+            depth + 1,
+            visited_folders=visited,
+            cancel_event=cancel_event,
+            dry_run=dry_run,
+            stats=stats,
+            _service=service,
+        )
 
     return downloaded_count
 

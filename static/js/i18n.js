@@ -243,6 +243,8 @@
       logJumpLatest: "+{n} new — Jump to latest",
       logEmpty: "No log entries match the current filter.",
       logLevelAll: "Level: All",
+      expandAll: "Expand All",
+      collapseAll: "Collapse All",
     },
     ar: {
       brand: "أداة المزامنة الموحدة",
@@ -484,6 +486,8 @@
       logJumpLatest: "+{n} جديد — انتقال للأحدث",
       logEmpty: "لا توجد أسطر سجل مطابقة للتصفية الحالية.",
       logLevelAll: "المستوى: الكل",
+      expandAll: "فتح الكل",
+      collapseAll: "طي الكل",
     },
   };
 

@@ -77,18 +77,22 @@ class SyncOrchestrator:
 
         if config_index is not None:
             if 0 <= config_index < len(configs):
-                selected = [(config_index, configs[config_index])]
+                active_selected = [(config_index, configs[config_index])]
+                paused_selected: List[Tuple[int, dict]] = []
             else:
                 with self._lock:
                     self.status["sharepoint"]["running"] = False
                 return False, "Invalid folder index.", None
         else:
-            selected = list(enumerate(configs))
+            # Pre-filter paused/excluded folders UP FRONT before starting the sync loop
+            active_selected = [
+                (i, c) for i, c in enumerate(configs) if c.get("sync_enabled", True) is not False
+            ]
+            paused_selected = [
+                (i, c) for i, c in enumerate(configs) if c.get("sync_enabled", True) is False
+            ]
 
-        enabled_count = sum(
-            1 for _i, c in selected if config_index is not None or c.get("sync_enabled", True) is not False
-        )
-        set_sync_active(True, service="sharepoint", queue_total=enabled_count)
+        set_sync_active(True, service="sharepoint", queue_total=len(active_selected))
 
         def _worker():
             started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -102,28 +106,85 @@ class SyncOrchestrator:
             total = 0
             processed = 0
             failed = 0
-            skipped_cfgs = 0
+            skipped_cfgs = len(paused_selected)
             skipped_files = 0
 
+            if paused_selected:
+                self._log(
+                    "sharepoint",
+                    f"📋 Active queue: {len(active_selected)} target(s) ({skipped_cfgs} paused excluded up front)",
+                )
+            elif active_selected:
+                self._log("sharepoint", f"📋 Active queue: {len(active_selected)} target(s)")
+
             try:
-                from sp_sync.sharepoint.sync_engine import _cleanup_playwright, start_sync_from_config
+                from sp_sync.sharepoint.sync_engine import (
+                    _cleanup_playwright,
+                    _config_matches_ledger_entry,
+                    process_priority_redownloads,
+                    start_sync_from_config,
+                )
 
                 try:
-                    for _idx, cfg in selected:
+                    # Phase 0: Give strict top priority to 🔁 Queued for Re-download items BEFORE folder scans!
+                    if not cancel_ev.is_set():
+                        redl_stats: Dict[str, Any] = {
+                            "downloaded": 0,
+                            "skipped": 0,
+                            "failed": 0,
+                            "new_files": [],
+                            "planned_files": [],
+                            "errors": [],
+                            "cancelled": False,
+                        }
+                        try:
+                            only_cfg = active_selected[0][1] if config_index is not None else None
+                            redl_count = process_priority_redownloads(
+                                fedauth,
+                                rtfa,
+                                site_url,
+                                configs,
+                                log_callback=lambda msg: self._log("sharepoint", msg),
+                                only_config=only_cfg,
+                                cancel_event=cancel_ev,
+                                dry_run=dry_run,
+                                keep_browser_open=True,
+                                stats=redl_stats,
+                            )
+                            total += int(redl_count or 0)
+                            new_files.extend(redl_stats.get("new_files") or [])
+                            planned_files.extend(redl_stats.get("planned_files") or [])
+                            if redl_stats.get("errors"):
+                                errors.extend(redl_stats["errors"][:5])
+                        except Exception as redl_exc:
+                            errors.append(f"Priority re-download: {redl_exc}")
+                            self._log("sharepoint", f"❌ Priority re-download error: {redl_exc}")
+
+                    # If any pending re-downloads remain (e.g. without rel_url), promote their active configs first
+                    ordered_active = list(active_selected)
+                    try:
+                        from sp_sync.db.store import get_store
+
+                        rem_pending = get_store().ledger_pending_redownloads()
+                        if rem_pending and len(ordered_active) > 1:
+                            prio = []
+                            rest = []
+                            for pair in ordered_active:
+                                if any(_config_matches_ledger_entry(pair[1], pe) for pe in rem_pending):
+                                    prio.append(pair)
+                                else:
+                                    rest.append(pair)
+                            ordered_active = prio + rest
+                    except Exception:
+                        pass
+
+                    for _idx, cfg in ordered_active:
                         if cancel_ev.is_set():
                             break
                         cfg_name = cfg.get("name", "SharePoint")
-                        if config_index is None and cfg.get("sync_enabled", True) is False:
-                            skipped_cfgs += 1
-                            config_results.append(
-                                {"name": cfg_name, "status": "skipped", "downloaded_files": 0, "error": "sync_disabled"}
-                            )
-                            self._log("sharepoint", f"⏭️ Skipped (sync off): {cfg_name}")
-                            continue
-
                         processed += 1
                         set_sync_status_message(f"Syncing {cfg_name}...", service="sharepoint")
-                        self._log("sharepoint", f"📂 Syncing: {cfg_name}...")
+                        self._log("sharepoint", f"📂 [{processed}/{len(ordered_active)}] Syncing: {cfg_name}...")
                         cfg_stats: Dict[str, Any] = {
                             "downloaded": 0,
                             "skipped": 0,
@@ -227,7 +288,7 @@ class SyncOrchestrator:
                     "skipped_files": skipped_files,
                     "new_files": new_files[:200],
                     "planned_files": planned_files[:200] if dry_run else [],
-                    "configs_total": len(selected),
+                    "configs_total": len(active_selected) + len(paused_selected),
                     "configs_processed": processed,
                     "configs_failed": failed,
                     "configs_skipped": skipped_cfgs,
@@ -269,18 +330,21 @@ class SyncOrchestrator:
 
         if config_index is not None:
             if 0 <= config_index < len(configs):
-                selected = [(config_index, configs[config_index])]
+                active_selected = [(config_index, configs[config_index])]
+                paused_selected: List[Tuple[int, dict]] = []
             else:
                 with self._lock:
                     self.status["gdrive"]["running"] = False
                 return False, "Invalid folder index.", None
         else:
-            selected = list(enumerate(configs))
+            active_selected = [
+                (i, c) for i, c in enumerate(configs) if c.get("sync_enabled", True) is not False
+            ]
+            paused_selected = [
+                (i, c) for i, c in enumerate(configs) if c.get("sync_enabled", True) is False
+            ]
 
-        enabled_count = sum(
-            1 for _i, c in selected if config_index is not None or c.get("sync_enabled", True) is not False
-        )
-        set_sync_active(True, service="gdrive", queue_total=enabled_count)
+        set_sync_active(True, service="gdrive", queue_total=len(active_selected))
 
         def _worker():
             started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -294,27 +358,27 @@ class SyncOrchestrator:
             total = 0
             processed = 0
             failed = 0
-            skipped_cfgs = 0
+            skipped_cfgs = len(paused_selected)
             skipped_files = 0
+
+            if paused_selected:
+                self._log(
+                    "gdrive",
+                    f"📋 Active queue: {len(active_selected)} target(s) ({skipped_cfgs} paused excluded up front)",
+                )
+            elif active_selected:
+                self._log("gdrive", f"📋 Active queue: {len(active_selected)} target(s)")
 
             try:
                 from sp_sync.gdrive import start_gdrive_sync
 
-                for _idx, cfg in selected:
+                for _idx, cfg in active_selected:
                     if cancel_ev.is_set():
                         break
                     cfg_name = cfg.get("name", "Google Drive")
-                    if config_index is None and cfg.get("sync_enabled", True) is False:
-                        skipped_cfgs += 1
-                        config_results.append(
-                            {"name": cfg_name, "status": "skipped", "downloaded_files": 0, "error": "sync_disabled"}
-                        )
-                        self._log("gdrive", f"⏭️ Skipped (sync off): {cfg_name}")
-                        continue
-
                     processed += 1
                     set_sync_status_message(f"Syncing {cfg_name}...", service="gdrive")
-                    self._log("gdrive", f"📂 Syncing: {cfg_name}...")
+                    self._log("gdrive", f"📂 [{processed}/{len(active_selected)}] Syncing: {cfg_name}...")
                     cfg_stats: Dict[str, Any] = {
                         "downloaded": 0,
                         "skipped": 0,
@@ -412,7 +476,7 @@ class SyncOrchestrator:
                     "skipped_files": skipped_files,
                     "new_files": new_files[:200],
                     "planned_files": planned_files[:200] if dry_run else [],
-                    "configs_total": len(selected),
+                    "configs_total": len(active_selected) + len(paused_selected),
                     "configs_processed": processed,
                     "configs_failed": failed,
                     "configs_skipped": skipped_cfgs,

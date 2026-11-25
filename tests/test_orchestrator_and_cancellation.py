@@ -18,6 +18,14 @@ from sp_sync.sync_orchestrator import SyncOrchestrator
 
 class TestOrchestratorAndCancellation(unittest.TestCase):
     def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._old_db = os.environ.get("SP_SYNC_DB_PATH")
+        os.environ["SP_SYNC_DB_PATH"] = os.path.join(self.tmp.name, "orch_test.sqlite")
+        from sp_sync.config.settings import clear_settings_cache
+        import sp_sync.db.store as store_mod
+
+        clear_settings_cache()
+        store_mod._store_singleton = None
         sync_metrics.reset_metrics()
         self.logs = []
         self.reports = []
@@ -27,7 +35,17 @@ class TestOrchestratorAndCancellation(unittest.TestCase):
         )
 
     def tearDown(self):
+        import sp_sync.db.store as store_mod
+        from sp_sync.config.settings import clear_settings_cache
+
         sync_metrics.reset_metrics()
+        store_mod._store_singleton = None
+        if self._old_db is None:
+            os.environ.pop("SP_SYNC_DB_PATH", None)
+        else:
+            os.environ["SP_SYNC_DB_PATH"] = self._old_db
+        clear_settings_cache()
+        self.tmp.cleanup()
 
     def test_prevents_concurrent_same_service_run_and_supports_stop(self):
         started = threading.Event()

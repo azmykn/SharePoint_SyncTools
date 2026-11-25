@@ -300,7 +300,7 @@ def _save_sync_report(service: str, report: dict) -> None:
 
 
 def _ledger_groups(query: str = "", status_filter: str = "all") -> List[dict]:
-    """Ledger rows grouped by subject folder, lectures in sequence order."""
+    """Ledger rows grouped by subject folder, sorted by configured sync order then sequence."""
     from sp_sync.db.store import get_store
     from sp_sync.sharepoint.ledger import resolve_ledger_path
     from sp_sync.sharepoint.naming import (
@@ -313,6 +313,7 @@ def _ledger_groups(query: str = "", status_filter: str = "all") -> List[dict]:
     q = (query or "").strip().lower()
     st = (status_filter or "all").strip().lower()
     groups: Dict[str, dict] = {}
+    group_rel_urls: Dict[str, List[str]] = {}
     for row in get_store().ledger_list():
         local_path = row.get("local_path") or ""
         folder = subject_dir(row.get("local_dir") or os.path.dirname(local_path))
@@ -344,10 +345,22 @@ def _ledger_groups(query: str = "", status_filter: str = "all") -> List[dict]:
                 "subject": subject,
                 "items": [],
                 "total_mb": 0.0,
+                "missing_count": 0,
+                "pending_count": 0,
+                "sync_order": None,
+                "sync_enabled": None,
             },
         )
+        rel_u = (row.get("rel_url") or "").strip().lower()
+        if rel_u:
+            group_rel_urls.setdefault(folder, []).append(rel_u)
+
         size_mb = round((size or 0) / (1024 * 1024), 1)
         g["total_mb"] = round(g["total_mb"] + size_mb, 1)
+        if not exists:
+            g["missing_count"] += 1
+        if redl:
+            g["pending_count"] += 1
         g["items"].append(
             {
                 "item_key": row.get("item_key"),
@@ -363,8 +376,63 @@ def _ledger_groups(query: str = "", status_filter: str = "all") -> List[dict]:
                 "downloaded_at": row.get("downloaded_at"),
             }
         )
+
+    # Map each ledger group to its configured SharePoint / Google Drive sync order (1-based)
+    all_cfgs = load_sp_configs() + load_gdrive_configs()
+    cfg_entries = []
+    for idx, cfg in enumerate(all_cfgs, start=1):
+        lp = (cfg.get("local_path") or "").strip()
+        cfg_abs = subject_dir(os.path.abspath(os.path.expanduser(lp))) if lp else ""
+        cfg_rel = (cfg.get("rel_url") or "").strip().rstrip("/").lower()
+        cfg_leaf = os.path.basename(cfg_rel) if cfg_rel else ""
+        cfg_name = (cfg.get("name") or "").strip().lower()
+        enabled = cfg.get("sync_enabled", True) is not False
+        cfg_entries.append((idx, cfg_abs, cfg_rel, cfg_leaf, cfg_name, enabled))
+
+    for folder, g in groups.items():
+        f_abs = os.path.abspath(folder)
+        f_name_low = (g["folder_name"] or "").strip().lower()
+        f_rels = group_rel_urls.get(folder) or []
+        best_match = None
+
+        # Pass 1: Exact local_path or exact rel_url prefix match (most reliable)
+        for idx, cfg_abs, cfg_rel, _cfg_leaf, _cfg_name, enabled in cfg_entries:
+            if cfg_rel and any(ru == cfg_rel or ru.startswith(cfg_rel + "/") for ru in f_rels):
+                best_match = (idx, enabled)
+                break
+            if cfg_abs and f_abs == cfg_abs:
+                best_match = (idx, enabled)
+                break
+
+        # Pass 2: Child of configured local_path (e.g. non-flat cloud-mirrored subfolder) or matching leaf/name
+        if best_match is None:
+            for idx, cfg_abs, _cfg_rel, cfg_leaf, cfg_name, enabled in cfg_entries:
+                if cfg_abs:
+                    try:
+                        if os.path.commonpath([cfg_abs, f_abs]) == cfg_abs and (
+                            not cfg_leaf or f_name_low == cfg_leaf or f_name_low == cfg_name
+                        ):
+                            best_match = (idx, enabled)
+                            break
+                    except ValueError:
+                        pass
+                if f_name_low and (f_name_low == cfg_leaf or f_name_low == cfg_name):
+                    best_match = (idx, enabled)
+                    break
+
+        if best_match is not None:
+            g["sync_order"] = best_match[0]
+            g["sync_enabled"] = best_match[1]
+
     out = []
-    for folder in sorted(groups, key=lambda f: groups[f]["subject"]):
+    for folder in sorted(
+        groups,
+        key=lambda f: (
+            groups[f]["sync_order"] is None,
+            groups[f]["sync_order"] if groups[f]["sync_order"] is not None else 999999,
+            groups[f]["subject"],
+        ),
+    ):
         g = groups[folder]
         g["items"].sort(key=lambda it: (it["seq"] is None, it["seq"] or 0, it["date"], it["name"]))
         out.append(g)

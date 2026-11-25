@@ -5,13 +5,15 @@
   <div class="card">
     <div class="card-header-row">
       <div class="toolbar-row">
-        <input type="text" id="ledger-search" class="form-input" style="width:260px;padding:7px 10px;" data-i18n-placeholder="ledgerSearchPh" placeholder="Search lectures or subjects...">
+        <input type="text" id="ledger-search" class="form-input" style="width:240px;padding:7px 10px;" data-i18n-placeholder="ledgerSearchPh" placeholder="Search lectures or subjects...">
         <select id="ledger-status-filter" class="form-input" style="width:auto;min-width:165px;padding:7px 10px;">
           <option value="all" data-i18n="ledgerAll">All</option>
           <option value="exists" data-i18n="ledgerExists">On Disk</option>
           <option value="missing" data-i18n="ledgerMissing">Missing</option>
           <option value="pending" data-i18n="ledgerPending">Pending Re-download</option>
         </select>
+        <button type="button" class="btn btn-outline btn-small" id="btn-ledger-expand-all">⊞ <span data-i18n="expandAll">Expand All</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-ledger-collapse-all">⊟ <span data-i18n="collapseAll">Collapse All</span></button>
       </div>
       <div class="toolbar-row">
         <div id="ledger-stats-bar" class="toolbar-row">
@@ -20,6 +22,9 @@
           <span class="badge">💾 {{ ledger_stats.total_mb }} MB</span>
           {% if ledger_stats.missing_count %}
           <span class="badge badge-warn">⚠️ {{ ledger_stats.missing_count }}</span>
+          {% endif %}
+          {% if ledger_stats.pending_redownload %}
+          <span class="badge badge-ok">🔁 {{ ledger_stats.pending_redownload }}</span>
           {% endif %}
         </div>
         <button type="button" class="btn btn-outline btn-small" id="btn-ledger-refresh" data-i18n="refresh">Refresh</button>
@@ -30,68 +35,83 @@
     </p>
   </div>
 
-  <!-- Server-rendered initially for instant load & full test compatibility, dynamically updated on search/filter -->
+  <!-- Collapsible folder groups sorted in configured sync order -->
   <div id="ledger-groups-container">
     {% if not groups %}
       <div class="empty-state" data-i18n="ledgerEmpty">No downloaded lectures recorded yet.</div>
     {% endif %}
     {% for g in groups %}
-    <div class="card">
-      <div class="card-header-row">
-        <div class="card-header">
-          📚 {{ g.subject }}
+    <div class="card ledger-group-card" data-folder="{{ g.folder }}">
+      <div class="ledger-group-header" data-ledger-toggle role="button" tabindex="0" aria-expanded="true">
+        <div class="ledger-group-title-wrap">
+          <span class="ledger-chevron" aria-hidden="true">▾</span>
+          {% if g.sync_order is not none %}
+            <span class="badge badge-accent" title="Sync order">#{{ g.sync_order }}</span>
+          {% endif %}
+          {% if g.sync_enabled is sameas false %}
+            <span class="badge badge-warn" data-i18n="paused">Paused</span>
+          {% endif %}
+          <span class="card-header" style="margin:0;">📚 {{ g.subject }}</span>
           <span class="badge">{{ g['items']|length }}</span>
-          <span class="muted" style="font-weight:400;font-size:0.82rem;">{{ g.total_mb }} MB</span>
+          <span class="muted" style="font-size:0.82rem;">{{ g.total_mb }} MB</span>
+          {% if g.pending_count %}
+            <span class="badge badge-warn">🔁 {{ g.pending_count }}</span>
+          {% endif %}
+          {% if g.missing_count %}
+            <span class="badge badge-err">✘ {{ g.missing_count }}</span>
+          {% endif %}
         </div>
         <button type="button" class="btn btn-outline btn-small" data-ledger-open="{{ g.folder }}">📂 <span data-i18n="openLocal">Open local folder</span></button>
       </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th data-i18n="ledgerColSeq">#</th>
-              <th data-i18n="ledgerColName">File Name</th>
-              <th data-i18n="ledgerColDate">Date</th>
-              <th data-i18n="ledgerColSize">Size</th>
-              <th data-i18n="ledgerColStatus">Local File</th>
-              <th data-i18n="ledgerColActions">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for it in g['items'] %}
-            <tr>
-              <td>{{ '%02d'|format(it.seq) if it.seq else '—' }}</td>
-              <td>
-                <div style="font-weight:600;">{{ it.name }}</div>
-                {% if it.original_name and it.original_name != it.name %}
-                  <div class="muted" style="font-size:0.74rem;">{{ it.original_name }}</div>
-                {% endif %}
-              </td>
-              <td>{{ it.date or '—' }}</td>
-              <td>{{ it.size_mb }} MB</td>
-              <td>
-                {% if it.redownload_requested %}
-                  <span class="badge badge-warn">🔁 <span data-i18n="ledgerStatusPending">Queued for Re-download</span></span>
-                {% elif it.local_exists %}
-                  <span class="badge badge-ok">✔ <span data-i18n="ledgerStatusOk">On Disk</span></span>
-                {% else %}
-                  <span class="badge badge-err">✘ <span data-i18n="ledgerStatusMissing">Missing</span></span>
-                {% endif %}
-              </td>
-              <td>
-                <div class="toolbar-row">
-                  {% if it.redownload_requested %}
-                    <button type="button" class="btn btn-outline btn-small" data-ledger-action="cancel-redl" data-key="{{ it.item_key }}" data-i18n="ledgerBtnCancelRedl">Cancel Queue</button>
-                  {% else %}
-                    <button type="button" class="btn btn-small" data-ledger-action="redl" data-key="{{ it.item_key }}" data-i18n="ledgerBtnRedl">تحميل من جديد</button>
+      <div class="ledger-group-body">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th data-i18n="ledgerColSeq">#</th>
+                <th data-i18n="ledgerColName">File Name</th>
+                <th data-i18n="ledgerColDate">Date</th>
+                <th data-i18n="ledgerColSize">Size</th>
+                <th data-i18n="ledgerColStatus">Local File</th>
+                <th data-i18n="ledgerColActions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for it in g['items'] %}
+              <tr>
+                <td>{{ '%02d'|format(it.seq) if it.seq else '—' }}</td>
+                <td>
+                  <div style="font-weight:600;">{{ it.name }}</div>
+                  {% if it.original_name and it.original_name != it.name %}
+                    <div class="muted" style="font-size:0.74rem;">{{ it.original_name }}</div>
                   {% endif %}
-                  <button type="button" class="btn btn-danger btn-small" data-ledger-action="delete" data-key="{{ it.item_key }}" data-i18n-title="ledgerBtnDelete" title="Remove Entry">🗑️</button>
-                </div>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+                </td>
+                <td>{{ it.date or '—' }}</td>
+                <td>{{ it.size_mb }} MB</td>
+                <td>
+                  {% if it.redownload_requested %}
+                    <span class="badge badge-warn">🔁 <span data-i18n="ledgerStatusPending">Queued for Re-download</span></span>
+                  {% elif it.local_exists %}
+                    <span class="badge badge-ok">✔ <span data-i18n="ledgerStatusOk">On Disk</span></span>
+                  {% else %}
+                    <span class="badge badge-err">✘ <span data-i18n="ledgerStatusMissing">Missing</span></span>
+                  {% endif %}
+                </td>
+                <td>
+                  <div class="toolbar-row">
+                    {% if it.redownload_requested %}
+                      <button type="button" class="btn btn-outline btn-small" data-ledger-action="cancel-redl" data-key="{{ it.item_key }}" data-i18n="ledgerBtnCancelRedl">Cancel Queue</button>
+                    {% else %}
+                      <button type="button" class="btn btn-small" data-ledger-action="redl" data-key="{{ it.item_key }}" data-i18n="ledgerBtnRedl">تحميل من جديد</button>
+                    {% endif %}
+                    <button type="button" class="btn btn-danger btn-small" data-ledger-action="delete" data-key="{{ it.item_key }}" data-i18n-title="ledgerBtnDelete" title="Remove Entry">🗑️</button>
+                  </div>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
     {% endfor %}

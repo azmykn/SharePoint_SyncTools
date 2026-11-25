@@ -291,6 +291,7 @@ code {
     border-radius: var(--radius-lg);
     padding: 18px 20px;
     margin-bottom: 16px;
+    min-width: 0;
     box-shadow: var(--shadow-sm);
 }
 
@@ -380,6 +381,7 @@ code {
     display: flex;
     flex-direction: column;
     gap: 5px;
+    min-width: 0;
 }
 
 .form-group.full {
@@ -394,6 +396,7 @@ code {
 
 .form-input {
     width: 100%;
+    max-width: 100%;
     padding: 9px 12px;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border-strong);
@@ -412,9 +415,10 @@ code {
 
 .input-with-button {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
 }
-.input-with-button .form-input { flex: 1; min-width: 0; }
+.input-with-button .form-input { flex: 1 1 220px; min-width: 0; }
 
 .checkbox-row {
     display: flex;
@@ -964,6 +968,8 @@ a.nav-item {
 .subtab-bar {
     display: inline-flex;
     align-items: center;
+    flex-wrap: wrap;
+    max-width: 100%;
     gap: 4px;
     padding: 4px;
     background: var(--bg-surface);
@@ -999,6 +1005,11 @@ a.nav-item {
 
 .subview-panel { display: none; animation: fadeSlide 0.18s ease; }
 .subview-panel.active { display: block; }
+.subview-panel.settings-stack.active {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
 
 /* Filter pill group (All / Active / Paused) */
 .pill-group {
@@ -1147,11 +1158,65 @@ a.nav-item {
 }
 .jump-latest-btn.visible { display: inline-flex; }
 
-/* Settings two-column helper for crisp desktop balance */
-.settings-stack {
+/* Collapsible Ledger Folder Groups */
+.ledger-group-card {
+    padding: 0;
+    overflow: hidden;
+}
+
+.ledger-group-header {
     display: flex;
-    flex-direction: column;
-    gap: 16px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 14px 18px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s ease;
+}
+.ledger-group-header:hover {
+    background: var(--bg-hover);
+}
+
+.ledger-group-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex-wrap: wrap;
+    min-width: 0;
+    flex: 1;
+}
+
+.ledger-chevron {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    flex-shrink: 0;
+    transition: transform 0.18s ease, background 0.15s ease;
+}
+
+.ledger-group-card.collapsed .ledger-chevron {
+    transform: rotate(-90deg);
+}
+html[dir="rtl"] .ledger-group-card.collapsed .ledger-chevron {
+    transform: rotate(90deg);
+}
+
+.ledger-group-body {
+    border-top: 1px solid var(--border);
+    padding: 0 18px 16px;
+}
+
+.ledger-group-card.collapsed .ledger-group-body {
+    display: none;
 }
 
 @media (max-width: 900px) {
