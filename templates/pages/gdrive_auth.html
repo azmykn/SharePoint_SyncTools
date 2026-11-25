@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}Google Drive Sign-in | Unified Sync Tool{% endblock %}
+
+{% block content %}
+  <div class="card" style="max-width:580px;margin:12px auto;padding:28px;">
+    <div style="text-align:center;margin-bottom:20px;">
+      <div style="font-size:2.4rem;margin-bottom:8px;">📁</div>
+      <h2 style="font-size:1.35rem;margin-bottom:6px;" data-i18n="gdAuthTitle">Google Drive Connection</h2>
+      <p class="muted" data-i18n="gdAuthDesc">Connect your Google Drive account to sync and download shared folders automatically.</p>
+    </div>
+
+    <div class="card" style="margin-bottom:18px;border-color:{{ 'rgba(16,185,129,0.4)' if authenticated else 'rgba(239,68,68,0.4)' }};">
+      <div class="card-header-row" style="margin:0;">
+        <div>
+          <strong>{% if authenticated %}✅ <span data-i18n="connected">Connected</span>{% else %}❌ <span data-i18n="disconnected">Not Connected</span>{% endif %}</strong>
+          <div class="muted" style="margin-top:4px;">
+            {% if authenticated %}{{ user or 'Google Drive Account' }}{% else %}<span data-i18n="gdAuthSignInReq">Sign-in required to browse and download folders</span>{% endif %}
+          </div>
+        </div>
+        {% if authenticated %}
+          <button type="button" class="btn btn-danger btn-small" id="btn-gd-disconnect" data-i18n="gdDisconnect">Disconnect</button>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if not authenticated %}
+      <button type="button" class="btn" id="btn-gd-login" style="width:100%;padding:12px;">
+        🔐 <span data-i18n="gdSignIn">Sign in with Google</span>
+      </button>
+    {% else %}
+      <a href="/gdrive" class="btn btn-success" style="width:100%;padding:12px;" data-i18n="gdAuthOpenDash">🚀 Open Google Drive</a>
+    {% endif %}
+
+    <div id="auth-progress" style="display:none;margin-top:16px;padding:14px;border-radius:10px;background:var(--accent-soft);text-align:center;">
+      <div style="font-weight:700;margin-bottom:6px;">⏳ Waiting for Google Authorization...</div>
+      <a id="auth-direct-link" href="#" target="_blank" style="color:var(--accent);font-size:0.88rem;">
+        Click here if the tab did not open automatically ↗
+      </a>
+    </div>
+
+    <details style="margin-top:18px;">
+      <summary style="cursor:pointer;font-size:0.88rem;color:var(--text-secondary);font-weight:600;" data-i18n="gdAuthManualSummary">
+        ⚙️ Remote server / manual authorization code
+      </summary>
+      <div style="margin-top:10px;">
+        <input type="text" id="manual-code" class="form-input" dir="ltr" placeholder="http://localhost:.../?code=... or 4/0A...">
+        <button type="button" class="btn btn-outline btn-small" id="btn-submit-code" style="margin-top:8px;">Submit Code</button>
+      </div>
+    </details>
+
+    <details style="margin-top:14px;" {% if not has_credentials %}open{% endif %}>
+      <summary style="cursor:pointer;font-size:0.88rem;color:var(--text-secondary);font-weight:600;">
+        🔑 <span data-i18n="gdUploadCreds">Upload credentials.json</span> ({{ 'Present' if has_credentials else 'Missing' }})
+      </summary>
+      <form id="form-upload-creds" style="margin-top:10px;">
+        <input type="file" id="creds-file" accept=".json" class="form-input" style="margin-bottom:8px;">
+        <button type="submit" class="btn btn-outline btn-small">Save credentials.json</button>
+      </form>
+    </details>
+
+    <div style="margin-top:18px;text-align:center;">
+      <a href="/gdrive" class="btn btn-outline" style="width:100%;" data-i18n="gdAuthReturnDash">← Return to Google Drive</a>
+    </div>
+  </div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      let pollTimer = null;
+
+      document.getElementById("btn-gd-login")?.addEventListener("click", async () => {
+        const btn = document.getElementById("btn-gd-login");
+        const box = document.getElementById("auth-progress");
+        btn.disabled = true;
+        box.style.display = "block";
+        const { ok, data } = await window.SyncApp.api("/gdrive/auth/start", { method: "POST" });
+        if (ok && data.success && data.auth_url) {
+          document.getElementById("auth-direct-link").href = data.auth_url;
+          window.open(data.auth_url, "_blank");
+          pollTimer = setInterval(async () => {
+            const st = await window.SyncApp.api("/gdrive/auth/status");
+            if (st.ok && (st.data.authenticated || st.data.flow_status === "success")) {
+              clearInterval(pollTimer);
+              window.SyncApp.toast("✅ Connected successfully!", "success");
+              setTimeout(() => { window.location.href = "/gdrive"; }, 800);
+            } else if (st.ok && st.data.flow_status === "error") {
+              clearInterval(pollTimer);
+              window.SyncApp.toast("Auth failed: " + (st.data.error || "Unknown error"), "error");
+              box.style.display = "none";
+              btn.disabled = false;
+            }
+          }, 2000);
+        } else {
+          window.SyncApp.toast(data.error || "Failed to start login", "error");
+          box.style.display = "none";
+          btn.disabled = false;
+        }
+      });
+
+      document.getElementById("btn-submit-code")?.addEventListener("click", async () => {
+        const val = (document.getElementById("manual-code")?.value || "").trim();
+        if (!val) { window.SyncApp.toast("Paste the authorization code or URL first", "warning"); return; }
+        const { ok, data } = await window.SyncApp.api("/gdrive/auth/code", { method: "POST", body: { code: val } });
+        if (ok && data.success) {
+          window.SyncApp.toast("✅ Connected as " + (data.user_email || "Google Drive"), "success");
+          setTimeout(() => { window.location.href = "/gdrive"; }, 800);
+        } else {
+          window.SyncApp.toast(data.error || "Code exchange failed", "error");
+        }
+      });
+
+      document.getElementById("btn-gd-disconnect")?.addEventListener("click", async () => {
+        const yes = await window.SyncApp.confirm("Disconnect Google Drive?");
+        if (!yes) return;
+        const res = await window.SyncApp.api("/gdrive/auth/disconnect", { method: "POST" });
+        if (res.ok) window.location.reload();
+      });
+
+      document.getElementById("form-upload-creds")?.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const f = document.getElementById("creds-file")?.files?.[0];
+        if (!f) { window.SyncApp.toast("Select credentials.json first", "warning"); return; }
+        const fd = new FormData();
+        fd.append("file", f);
+        const { ok, data } = await window.SyncApp.api("/gdrive/upload_credentials", { method: "POST", body: fd });
+        if (ok && data.success) {
+          window.SyncApp.toast("✅ credentials.json saved!", "success");
+          setTimeout(() => window.location.reload(), 700);
+        } else {
+          window.SyncApp.toast(data.error || "Invalid JSON", "error");
+        }
+      });
+    });
+  </script>
+{% endblock %}

@@ -1,14 +1,17 @@
-"""SQLite-backed application state (configs, cookies, OAuth token, logs)."""
+"""SQLite-backed application state (configs, encrypted cookies/OAuth token, logs, ledger)."""
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 from sp_sync.config.settings import database_file_path
+from sp_sync.security.vault import decrypt_secret, encrypt_secret
 
 KEY_SP_CONFIGS = "sharepoint_configs"
 KEY_GDRIVE_CONFIGS = "gdrive_configs"
@@ -19,6 +22,9 @@ KEY_SP_SITE_URL = "sharepoint_site_root_url"
 KEY_SYNC_REPORT_SP = "sync_report_sharepoint"
 KEY_SYNC_REPORT_GD = "sync_report_gdrive"
 KEY_SYNC_REPORT_HISTORY = "sync_report_history"
+KEY_APP_SETTINGS = "app_settings_overrides"
+
+_SECRET_KEYS = {KEY_SP_COOKIES, KEY_GDRIVE_TOKEN}
 
 _lock = threading.RLock()
 _store_singleton: Optional["AppStore"] = None
@@ -29,19 +35,40 @@ def _default_db_path() -> str:
 
 
 class AppStore:
-    """Thread-safe key-value + append-only logs in SQLite."""
+    """Thread-safe key-value + append-only logs + download ledger in SQLite (WAL mode)."""
 
     def __init__(self, db_path: Optional[str] = None) -> None:
         self.db_path = db_path or _default_db_path()
+        self._log_write_counter = 0
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=60, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.execute("PRAGMA busy_timeout=60000")
+            yield conn
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
-        with self._connect() as conn:
+        parent = os.path.dirname(os.path.abspath(self.db_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with _lock, self._connect() as conn:
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+            except sqlite3.DatabaseError:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS kv (
@@ -64,10 +91,6 @@ class AppStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_log_entries_ts ON log_entries(ts DESC)"
             )
-            # Download ledger: every SharePoint item that was ever downloaded (or matched
-            # to an existing local file).  Items listed here are never downloaded again,
-            # even if the local file is renamed, moved, trimmed or deleted, unless the
-            # user asks for a re-download (redownload_requested = 1).
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS downloaded_files (
@@ -88,24 +111,39 @@ class AppStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_downloaded_files_dir ON downloaded_files(local_dir)"
             )
+        if os.name == "posix" and os.path.isfile(self.db_path):
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass
+
+    def _get_text_unlocked(self, conn: sqlite3.Connection, key: str, default: str = "") -> str:
+        row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        if not row or row[0] is None:
+            return default
+        val = row[0]
+        if key in _SECRET_KEYS:
+            return decrypt_secret(val, self.db_path)
+        return val
+
+    def _set_text_unlocked(self, conn: sqlite3.Connection, key: str, value: str) -> None:
+        ts = datetime.now().isoformat(timespec="seconds")
+        stored = encrypt_secret(value, self.db_path) if (key in _SECRET_KEYS and value) else value
+        conn.execute(
+            """
+            INSERT INTO kv(key, value, updated_at) VALUES(?,?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (key, stored, ts),
+        )
 
     def get_text(self, key: str, default: str = "") -> str:
         with _lock, self._connect() as conn:
-            row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
-            if not row:
-                return default
-            return row[0] if row[0] is not None else default
+            return self._get_text_unlocked(conn, key, default)
 
     def set_text(self, key: str, value: str) -> None:
-        ts = datetime.now().isoformat(timespec="seconds")
         with _lock, self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO kv(key, value, updated_at) VALUES(?,?,?)
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-                """,
-                (key, value, ts),
-            )
+            self._set_text_unlocked(conn, key, value)
 
     def get_json(self, key: str, default: Any = None) -> Any:
         raw = self.get_text(key, "")
@@ -123,34 +161,79 @@ class AppStore:
         with _lock, self._connect() as conn:
             conn.execute("DELETE FROM kv WHERE key = ?", (key,))
 
-    def append_log(self, ts: str, source: str, msg: str) -> None:
+    def append_log(self, ts: str, source: str, msg: str) -> int:
         with _lock, self._connect() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT INTO log_entries(ts, source, msg) VALUES (?,?,?)",
                 (ts, source, msg),
             )
-            conn.execute(
-                """
-                DELETE FROM log_entries WHERE id NOT IN (
-                    SELECT id FROM log_entries ORDER BY id DESC LIMIT 2500
+            row_id = int(cur.lastrowid or 0)
+            self._log_write_counter += 1
+            if self._log_write_counter >= 50:
+                self._log_write_counter = 0
+                conn.execute(
+                    """
+                    DELETE FROM log_entries
+                    WHERE id <= (
+                        SELECT id FROM log_entries ORDER BY id DESC LIMIT 1 OFFSET 2500
+                    )
+                    """
                 )
-                """
-            )
+            return row_id
 
-    def recent_logs(self, limit: int = 500) -> list[dict]:
+    def recent_logs(
+        self, limit: int = 500, *, source: Optional[str] = None, after_id: int = 0
+    ) -> list[dict]:
         with _lock, self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT ts, source, msg FROM log_entries
-                ORDER BY id DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        out = [{"time": r["ts"], "source": r["source"], "msg": r["msg"]} for r in rows]
+            if after_id and after_id > 0:
+                if source and source != "all":
+                    rows = conn.execute(
+                        """
+                        SELECT id, ts, source, msg FROM log_entries
+                        WHERE id > ? AND source = ?
+                        ORDER BY id ASC LIMIT ?
+                        """,
+                        (int(after_id), source, int(limit)),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT id, ts, source, msg FROM log_entries
+                        WHERE id > ?
+                        ORDER BY id ASC LIMIT ?
+                        """,
+                        (int(after_id), int(limit)),
+                    ).fetchall()
+                return [
+                    {"id": r["id"], "time": r["ts"], "source": r["source"], "msg": r["msg"]}
+                    for r in rows
+                ]
+
+            if source and source != "all":
+                rows = conn.execute(
+                    """
+                    SELECT id, ts, source, msg FROM log_entries
+                    WHERE source = ?
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (source, int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, ts, source, msg FROM log_entries
+                    ORDER BY id DESC LIMIT ?
+                    """,
+                    (int(limit),),
+                ).fetchall()
+        out = [
+            {"id": r["id"], "time": r["ts"], "source": r["source"], "msg": r["msg"]}
+            for r in rows
+        ]
         out.reverse()
         return out
 
-    def clear_logs(self, source: str | None = None) -> None:
+    def clear_logs(self, source: Optional[str] = None) -> None:
         """Remove log rows; source=None or 'all' clears everything."""
         with _lock, self._connect() as conn:
             if source and source != "all":
@@ -198,6 +281,13 @@ class AppStore:
     def set_sharepoint_site_url(self, url: str) -> None:
         self.set_text(KEY_SP_SITE_URL, (url or "").strip())
 
+    def get_app_settings_overrides(self) -> dict:
+        v = self.get_json(KEY_APP_SETTINGS, None)
+        return v if isinstance(v, dict) else {}
+
+    def set_app_settings_overrides(self, overrides: dict) -> None:
+        self.set_json(KEY_APP_SETTINGS, overrides if isinstance(overrides, dict) else {})
+
     def get_sync_report(self, service: str) -> dict:
         """Get last sync report for a service ('sharepoint' or 'gdrive')."""
         svc = (service or "").strip().lower()
@@ -212,14 +302,21 @@ class AppStore:
         self.set_json(key, report if isinstance(report, dict) else {})
 
     def append_sync_report_history(self, report: dict, max_items: int = 1000) -> None:
-        """Append one sync report event to history (newest first, capped)."""
+        """Atomically append one sync report event to history (newest first, capped)."""
         if not isinstance(report, dict) or not report:
             return
-        cur = self.get_json(KEY_SYNC_REPORT_HISTORY, None)
-        items = cur if isinstance(cur, list) else []
-        items.insert(0, report)
         cap = max(1, int(max_items))
-        self.set_json(KEY_SYNC_REPORT_HISTORY, items[:cap])
+        with _lock, self._connect() as conn:
+            raw = self._get_text_unlocked(conn, KEY_SYNC_REPORT_HISTORY, "")
+            try:
+                cur = json.loads(raw) if raw.strip() else []
+            except json.JSONDecodeError:
+                cur = []
+            items = cur if isinstance(cur, list) else []
+            items.insert(0, report)
+            self._set_text_unlocked(
+                conn, KEY_SYNC_REPORT_HISTORY, json.dumps(items[:cap], ensure_ascii=False)
+            )
 
     def get_sync_report_history(self, service: str = "all", limit: int = 20, query: str = "") -> list[dict]:
         """Get sync report history, optionally filtered by service and free-text query."""
@@ -252,19 +349,26 @@ class AppStore:
         return out
 
     def clear_sync_report_history(self, service: str = "all") -> None:
-        """Clear all report history or only one service."""
+        """Atomically clear all report history or only one service."""
         svc = (service or "all").strip().lower()
-        if svc == "all":
-            self.set_json(KEY_SYNC_REPORT_HISTORY, [])
-            return
-        cur = self.get_json(KEY_SYNC_REPORT_HISTORY, None)
-        items = cur if isinstance(cur, list) else []
-        kept = [
-            it for it in items
-            if isinstance(it, dict) and (it.get("service") or "").strip().lower() != svc
-        ]
-        self.set_json(KEY_SYNC_REPORT_HISTORY, kept)
-
+        with _lock, self._connect() as conn:
+            if svc == "all":
+                self._set_text_unlocked(conn, KEY_SYNC_REPORT_HISTORY, "[]")
+                return
+            raw = self._get_text_unlocked(conn, KEY_SYNC_REPORT_HISTORY, "")
+            try:
+                cur = json.loads(raw) if raw.strip() else []
+            except json.JSONDecodeError:
+                cur = []
+            items = cur if isinstance(cur, list) else []
+            kept = [
+                it
+                for it in items
+                if isinstance(it, dict) and (it.get("service") or "").strip().lower() != svc
+            ]
+            self._set_text_unlocked(
+                conn, KEY_SYNC_REPORT_HISTORY, json.dumps(kept, ensure_ascii=False)
+            )
 
     # ---------------- download ledger ----------------
     def ledger_get(self, item_key: str) -> Optional[dict]:
@@ -288,13 +392,12 @@ class AppStore:
         source: str = "download",
     ) -> str:
         """Insert or update a ledger row (clears any pending re-download request)."""
-        import os as _os
-
         key = ledger_key(item_id, rel_url)
         if not key:
             raise ValueError("ledger_record needs item_id or rel_url")
-        local_dir = _os.path.dirname(_os.path.abspath(local_path)) if local_path else ""
+        local_dir = os.path.dirname(os.path.abspath(local_path)) if local_path else ""
         now = datetime.now().isoformat(timespec="seconds")
+        size_val = int(size) if size is not None else None
         with _lock, self._connect() as conn:
             conn.execute(
                 """
@@ -308,9 +411,18 @@ class AppStore:
                     local_path = excluded.local_path, source = excluded.source,
                     redownload_requested = 0, downloaded_at = excluded.downloaded_at
                 """,
-                (key, item_id or None, rel_url or None, original_name or "",
-                 int(size) if size else None, modified, local_dir,
-                 _os.path.abspath(local_path) if local_path else "", source, now),
+                (
+                    key,
+                    item_id or None,
+                    rel_url or None,
+                    original_name or "",
+                    size_val,
+                    modified,
+                    local_dir,
+                    os.path.abspath(local_path) if local_path else "",
+                    source,
+                    now,
+                ),
             )
         return key
 
@@ -342,20 +454,34 @@ class AppStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def ledger_map(self) -> dict[str, dict]:
+        """Return all ledger entries keyed by item_key in a single SQLite query."""
+        return {row["item_key"]: row for row in self.ledger_list() if row.get("item_key")}
+
+    def ledger_pending_redownloads(self) -> list[dict]:
+        """Return all items explicitly queued for re-download, oldest request first."""
+        with _lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM downloaded_files
+                WHERE redownload_requested = 1
+                ORDER BY downloaded_at ASC, item_key ASC
+                """
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def ledger_paths(self) -> set:
         with _lock, self._connect() as conn:
             rows = conn.execute("SELECT local_path FROM downloaded_files").fetchall()
         return {r[0] for r in rows if r[0]}
 
     def ledger_names_in_dir(self, local_dir: str) -> list[str]:
-        import os as _os
-
-        d = _os.path.abspath(local_dir)
+        d = os.path.abspath(local_dir)
         with _lock, self._connect() as conn:
             rows = conn.execute(
                 "SELECT local_path FROM downloaded_files WHERE local_dir = ?", (d,)
             ).fetchall()
-        return [_os.path.basename(r[0]) for r in rows if r[0]]
+        return [os.path.basename(r[0]) for r in rows if r[0]]
 
 
 def ledger_key(item_id: Optional[str], rel_url: Optional[str]) -> str:

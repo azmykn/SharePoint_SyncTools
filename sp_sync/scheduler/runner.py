@@ -101,7 +101,11 @@ def _compute_next_run(cfg: Dict[str, Any], now: Optional[datetime] = None) -> Op
         if last_str:
             try:
                 last_dt = datetime.strptime(last_str, "%Y-%m-%d %H:%M:%S")
-                return (last_dt + timedelta(hours=interval)).strftime("%Y-%m-%d %H:%M:%S")
+                candidate = last_dt + timedelta(hours=interval)
+                # Avoid displaying a stale timestamp in the distant past when already due.
+                if candidate < now:
+                    candidate = now
+                return candidate.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
                 pass
         return (now + timedelta(hours=interval)).strftime("%Y-%m-%d %H:%M:%S")
@@ -119,70 +123,71 @@ def save_scheduler_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     - interval_hours: one of {1, 2, 4, 6, 12, 24}
     - target: one of {'all', 'sharepoint', 'gdrive'}
     """
-    current = get_scheduler_settings()
+    with _lock:
+        current = get_scheduler_settings()
 
-    if "enabled" in settings:
-        current["enabled"] = _to_bool(settings.get("enabled"))
+        if "enabled" in settings:
+            current["enabled"] = _to_bool(settings.get("enabled"))
 
-    if "schedule_mode" in settings:
-        mode = str(settings.get("schedule_mode") or "").strip().lower()
-        if mode not in {"daily", "interval"}:
-            raise ValueError("'schedule_mode' must be one of: daily, interval")
-        current["schedule_mode"] = mode
+        if "schedule_mode" in settings:
+            mode = str(settings.get("schedule_mode") or "").strip().lower()
+            if mode not in {"daily", "interval"}:
+                raise ValueError("'schedule_mode' must be one of: daily, interval")
+            current["schedule_mode"] = mode
 
-    if "daily_time" in settings:
-        current["daily_time"] = _parse_daily_time(settings.get("daily_time"))
+        if "daily_time" in settings:
+            current["daily_time"] = _parse_daily_time(settings.get("daily_time"))
 
-    if "interval_hours" in settings:
-        raw_interval = settings.get("interval_hours")
-        if raw_interval is None:
-            raise ValueError("'interval_hours' must be an integer")
-        try:
-            interval = int(raw_interval)
-        except (TypeError, ValueError):
-            raise ValueError("'interval_hours' must be an integer")
-        allowed = {1, 2, 4, 6, 12, 24}
-        if interval not in allowed:
-            raise ValueError("'interval_hours' must be one of: 1, 2, 4, 6, 12, 24")
-        current["interval_hours"] = interval
-
-    if "target" in settings:
-        target = str(settings.get("target") or "").strip().lower()
-        if target not in {"all", "sharepoint", "gdrive"}:
-            raise ValueError("'target' must be one of: all, sharepoint, gdrive")
-        current["target"] = target
-
-    if "last_run" in settings:
-        last_run = settings.get("last_run")
-        if last_run in (None, ""):
-            current["last_run"] = None
-        elif isinstance(last_run, str):
+        if "interval_hours" in settings:
+            raw_interval = settings.get("interval_hours")
+            if raw_interval is None:
+                raise ValueError("'interval_hours' must be an integer")
             try:
-                datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                raise ValueError("'last_run' must be in format YYYY-MM-DD HH:MM:SS")
-            current["last_run"] = last_run
-        else:
-            raise ValueError("'last_run' must be a string timestamp or null")
+                interval = int(raw_interval)
+            except (TypeError, ValueError):
+                raise ValueError("'interval_hours' must be an integer")
+            allowed = {1, 2, 4, 6, 12, 24}
+            if interval not in allowed:
+                raise ValueError("'interval_hours' must be one of: 1, 2, 4, 6, 12, 24")
+            current["interval_hours"] = interval
 
-    # Ensure defaults for older stored configs
-    if not current.get("schedule_mode"):
-        current["schedule_mode"] = "daily"
-    if not current.get("daily_time"):
-        current["daily_time"] = "02:00"
+        if "target" in settings:
+            target = str(settings.get("target") or "").strip().lower()
+            if target not in {"all", "sharepoint", "gdrive"}:
+                raise ValueError("'target' must be one of: all, sharepoint, gdrive")
+            current["target"] = target
 
-    current["next_run"] = _compute_next_run(current)
-    get_store().set_json(KEY_SCHEDULER_SETTINGS, current)
-    return current
+        if "last_run" in settings:
+            last_run = settings.get("last_run")
+            if last_run in (None, ""):
+                current["last_run"] = None
+            elif isinstance(last_run, str):
+                try:
+                    datetime.strptime(last_run, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    raise ValueError("'last_run' must be in format YYYY-MM-DD HH:MM:SS")
+                current["last_run"] = last_run
+            else:
+                raise ValueError("'last_run' must be a string timestamp or null")
+
+        if not current.get("schedule_mode"):
+            current["schedule_mode"] = "daily"
+        if not current.get("daily_time"):
+            current["daily_time"] = "02:00"
+
+        current["next_run"] = _compute_next_run(current)
+        get_store().set_json(KEY_SCHEDULER_SETTINGS, current)
+        return current
 
 
 def mark_scheduler_run_completed(target: str = "all") -> None:
     """Record completion timestamp and schedule next execution."""
-    now = datetime.now()
-    cfg = get_scheduler_settings()
-    cfg["last_run"] = now.strftime("%Y-%m-%d %H:%M:%S")
-    cfg["next_run"] = _compute_next_run(cfg, now=now)
-    get_store().set_json(KEY_SCHEDULER_SETTINGS, cfg)
+    with _lock:
+        now = datetime.now()
+        cfg = get_scheduler_settings()
+        cfg["last_run"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        cfg["next_run"] = _compute_next_run(cfg, now=now)
+        get_store().set_json(KEY_SCHEDULER_SETTINGS, cfg)
 
 
 def is_run_due() -> bool:
@@ -254,17 +259,23 @@ def _scheduler_loop():
     """Background polling loop that checks for due jobs every 20 seconds."""
     while _running_event.is_set():
         try:
-            if is_run_due():
-                cfg = get_scheduler_settings()
-                target = cfg.get("target", "all")
+            with _lock:
+                due = is_run_due()
+                if due:
+                    cfg = get_scheduler_settings()
+                    target = cfg.get("target", "all")
+                    cb = _sync_callback
+                else:
+                    target = None
+                    cb = None
+            if due and target is not None:
                 _logger.info("Scheduler triggered automatic sync (target=%s)", target)
-                if _sync_callback:
-                    _sync_callback(target)
+                if cb:
+                    cb(target)
                 mark_scheduler_run_completed(target)
         except Exception as exc:
             _logger.exception("Error in scheduler loop: %s", exc)
 
-        # Sleep in small slices to allow rapid shutdown
         for _ in range(20):
             if not _running_event.is_set():
                 break
@@ -295,19 +306,17 @@ def is_scheduler_daemon_alive() -> bool:
 
 
 def run_scheduler_now(target: str | None = None) -> dict[str, Any]:
-    """Trigger scheduler callback immediately (manual force-run).
+    """Trigger scheduler callback immediately (manual force-run)."""
+    with _lock:
+        cfg = get_scheduler_settings()
+        tgt = (target or cfg.get("target") or "all").strip().lower()
+        if tgt not in {"all", "sharepoint", "gdrive"}:
+            raise ValueError("target must be one of: all, sharepoint, gdrive")
+        cb = _sync_callback
+        if cb is None:
+            raise RuntimeError("Scheduler callback is not initialized")
 
-    Returns a small status payload for API/UI usage.
-    """
-    cfg = get_scheduler_settings()
-    tgt = (target or cfg.get("target") or "all").strip().lower()
-    if tgt not in {"all", "sharepoint", "gdrive"}:
-        raise ValueError("target must be one of: all, sharepoint, gdrive")
-
-    if _sync_callback is None:
-        raise RuntimeError("Scheduler callback is not initialized")
-
-    _sync_callback(tgt)
+    cb(tgt)
     mark_scheduler_run_completed(tgt)
     updated = get_scheduler_settings()
     return {

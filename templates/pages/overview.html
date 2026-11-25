@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}Overview | Unified Sync Tool{% endblock %}
+
+{% block content %}
+  {% if not sp_site_configured %}
+  <div class="notice-bar">
+    <span>⚠️ <strong data-i18n="spSiteMissingTitle">SharePoint site URL not configured yet</strong> — <span class="muted" data-i18n="spSiteMissingShort">Paste a SharePoint link in Explorer or configure it in Settings.</span></span>
+    <div class="toolbar-row">
+      <a href="/sharepoint?view=explorer" class="btn btn-outline btn-small" data-i18n="openExplorer">Open Explorer</a>
+      <a href="/settings?section=connections" class="btn btn-small" data-i18n="navSettings">Settings</a>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- 4 Focused, Clickable KPI Cards (Connection status lives once in the sidebar) -->
+  <div class="kpi-grid-4">
+    <a href="/sharepoint" class="kpi-card kpi-card-link">
+      <div class="kpi-label" data-i18n="kpiFolders">Active Sync Targets</div>
+      <div class="kpi-value" id="kpi-folders-val">{{ sp_active_count + gd_active_count }}</div>
+      <div class="kpi-sub" id="kpi-folders-sub" dir="ltr">SP: {{ sp_active_count }}/{{ sp_total_count }} • GD: {{ gd_active_count }}/{{ gd_total_count }}</div>
+    </a>
+
+    <a href="/ledger" class="kpi-card kpi-card-link">
+      <div class="kpi-label" data-i18n="kpiLectures">Downloaded Lectures</div>
+      <div class="kpi-value" id="kpi-lectures-val">{{ ledger_count }}</div>
+      <div class="kpi-sub" id="kpi-lectures-sub">—</div>
+    </a>
+
+    <a href="/settings?section=health" class="kpi-card kpi-card-link">
+      <div class="kpi-label" data-i18n="kpiDisk">Free Disk Space</div>
+      <div class="kpi-value"><span id="kpi-disk-val" dir="ltr" style="display:inline-block;">—</span></div>
+      <div class="kpi-sub" id="kpi-disk-sub">—</div>
+    </a>
+
+    <a href="/settings?section=automation" class="kpi-card kpi-card-link">
+      <div class="kpi-label" data-i18n="kpiScheduler">Auto Scheduler</div>
+      <div class="kpi-value" id="kpi-sched-val">
+        {% if scheduler_settings and scheduler_settings.enabled %}
+          <span style="color:var(--success);" data-i18n="enabled">Enabled</span>
+        {% else %}
+          <span style="color:var(--text-secondary);" data-i18n="disabled">Disabled</span>
+        {% endif %}
+      </div>
+      <div class="kpi-sub" id="kpi-sched-sub">
+        {% if scheduler_settings and scheduler_settings.next_run %}
+          {{ scheduler_settings.next_run }}
+        {% else %}
+          <span data-i18n="manualOnly">Manual only</span>
+        {% endif %}
+      </div>
+    </a>
+  </div>
+
+  <!-- Unified Sync Reports & History (with Last Scheduled Run integrated inline) -->
+  <div class="card" id="sync-report-card">
+    <div class="card-header-row">
+      <div>
+        <div class="card-header">📊 <span data-i18n="lastSyncSummary">Sync Summary & History</span></div>
+        <div id="scheduler-last-summary-inline" class="muted" style="margin-top:4px;font-size:0.8rem;"></div>
+      </div>
+      <div class="toolbar-row">
+        <select id="sync-report-service-filter" class="form-input" style="width:auto;min-width:130px;padding:6px 10px;">
+          <option value="all" data-i18n="allServices">All services</option>
+          <option value="sharepoint">SharePoint</option>
+          <option value="gdrive">Google Drive</option>
+        </select>
+        <select id="sync-report-limit-filter" class="form-input" style="width:auto;min-width:105px;padding:6px 10px;">
+          <option value="6" data-i18n="last6">Last 6</option>
+          <option value="10" data-i18n="last10">Last 10</option>
+          <option value="20" data-i18n="last20">Last 20</option>
+          <option value="50" data-i18n="last50">Last 50</option>
+        </select>
+        <input id="sync-report-search" class="form-input" type="text" data-i18n-placeholder="searchHistoryPh" placeholder="Search history..." style="width:185px;padding:6px 10px;">
+        <button type="button" class="btn btn-outline btn-small" id="btn-report-refresh" data-i18n="refresh">Refresh</button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-report-export" data-i18n="exportJson">Export JSON</button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-report-clear" data-i18n="clear">Clear</button>
+      </div>
+    </div>
+    <div id="sync-report-content" class="muted" data-i18n="noReportYet">No sync report recorded yet.</div>
+    <div class="muted" style="margin:12px 0 6px;font-weight:600;" data-i18n="recentRuns">Recent runs (newest first)</div>
+    <div id="sync-report-history" class="muted" data-i18n="noHistoryYet">No history yet.</div>
+  </div>
+
+  <!-- Live Activity Peek (Latest 6 lines, newest on top, links directly to /logs) -->
+  <div class="card">
+    <div class="card-header-row" style="margin-bottom:10px;">
+      <div class="card-header">📝 <span data-i18n="recentActivityTitle">Latest Activity</span></div>
+      <a href="/logs" class="btn btn-outline btn-small" data-i18n="openLiveLog">Open Live Log →</a>
+    </div>
+    <div id="overview-mini-logs" class="terminal-mini"></div>
+  </div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script defer src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

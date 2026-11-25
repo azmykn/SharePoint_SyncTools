@@ -18,6 +18,7 @@ if _REPO_ROOT not in sys.path:
 class TestScheduler(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self._old_db = os.environ.get("SP_SYNC_DB_PATH")
         self.db_path = os.path.join(self.tmp_dir.name, "test_scheduler.sqlite")
         os.environ["SP_SYNC_DB_PATH"] = self.db_path
 
@@ -48,6 +49,14 @@ class TestScheduler(unittest.TestCase):
 
     def tearDown(self):
         self.stop_scheduler_daemon()
+        import sp_sync.db.store as store_mod
+        from sp_sync.config.settings import clear_settings_cache
+        store_mod._store_singleton = None
+        if self._old_db is None:
+            os.environ.pop("SP_SYNC_DB_PATH", None)
+        else:
+            os.environ["SP_SYNC_DB_PATH"] = self._old_db
+        clear_settings_cache()
         self.tmp_dir.cleanup()
 
     def test_default_settings(self):

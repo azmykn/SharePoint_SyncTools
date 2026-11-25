@@ -75,45 +75,49 @@ class TestCaptureResume(unittest.TestCase):
     def test_resume_muxes_completed_capture_temps(self):
         logs = []
         with tempfile.TemporaryDirectory() as tmp:
+            fake_tmp_dir = os.path.join(tmp, "tmp_segments")
             out = os.path.join(tmp, "MBA-09.mp4")
-            work = _capture_work_dir(out)
-            os.makedirs(work, exist_ok=True)
-            v_file = os.path.join(work, "video.fmp4")
-            a_file = os.path.join(work, "audio.fmp4")
-            with open(v_file, "wb") as f:
-                f.write(b"\x00" * 500)
-            with open(a_file, "wb") as f:
-                f.write(b"\x00" * 200)
-            _save_capture_progress(work, {"capture_complete": True, "last_time": 600})
+            with patch("sp_sync.sharepoint.sync_engine.TMP_DIR", fake_tmp_dir):
+                work = _capture_work_dir(out)
+                os.makedirs(work, exist_ok=True)
+                v_file = os.path.join(work, "video.fmp4")
+                a_file = os.path.join(work, "audio.fmp4")
+                with open(v_file, "wb") as f:
+                    f.write(b"\x00" * 500)
+                with open(a_file, "wb") as f:
+                    f.write(b"\x00" * 200)
+                _save_capture_progress(work, {"capture_complete": True, "last_time": 600})
 
-            def fake_mux(ff, vf, af, output_path, log=print, tmp_dir=None):
-                _write_min_mp4(output_path)
-                return True, os.path.getsize(output_path)
+                def fake_mux(ff, vf, af, output_path, log=print, tmp_dir=None):
+                    _write_min_mp4(output_path)
+                    return True, os.path.getsize(output_path)
 
-            with patch(
-                "sp_sync.sharepoint.sync_engine._mux_captured_tracks", side_effect=fake_mux
-            ), patch(
-                "sp_sync.sharepoint.sync_engine.resolve_ffmpeg_path", return_value="/usr/bin/ffmpeg"
-            ):
-                result = _try_resume_from_existing_capture(out, log=logs.append)
+                with patch(
+                    "sp_sync.sharepoint.sync_engine._mux_captured_tracks", side_effect=fake_mux
+                ), patch(
+                    "sp_sync.sharepoint.sync_engine.resolve_ffmpeg_path", return_value="/usr/bin/ffmpeg"
+                ):
+                    result = _try_resume_from_existing_capture(out, log=logs.append)
 
-            self.assertIsNotNone(result)
-            ok, size = result
-            self.assertTrue(ok)
-            self.assertGreater(size, 0)
-            self.assertTrue(os.path.isfile(out))
-            self.assertTrue(any("Resuming: remuxing" in m for m in logs))
-            self.assertIsNone(_load_capture_progress(work))
+                self.assertIsNotNone(result)
+                ok, size = result
+                self.assertTrue(ok)
+                self.assertGreater(size, 0)
+                self.assertTrue(os.path.isfile(out))
+                self.assertTrue(any("Resuming: remuxing" in m for m in logs))
+                self.assertIsNone(_load_capture_progress(work))
 
     def test_incomplete_capture_does_not_force_mux(self):
         with tempfile.TemporaryDirectory() as tmp:
+            fake_tmp_dir = os.path.join(tmp, "tmp_segments")
             out = os.path.join(tmp, "MBA-09.mp4")
-            work = _capture_work_dir(out)
-            os.makedirs(work, exist_ok=True)
-            with open(os.path.join(work, "video.fmp4"), "wb") as f:
-                f.write(b"\x00" * 500)
-            _save_capture_progress(work, {"capture_complete": False, "last_time": 90})
-            self.assertIsNone(_try_resume_from_existing_capture(out, log=lambda *_: None))
+            with patch("sp_sync.sharepoint.sync_engine.TMP_DIR", fake_tmp_dir):
+                work = _capture_work_dir(out)
+                os.makedirs(work, exist_ok=True)
+                with open(os.path.join(work, "video.fmp4"), "wb") as f:
+                    f.write(b"\x00" * 500)
+                _save_capture_progress(work, {"capture_complete": False, "last_time": 90})
+                self.assertIsNone(_try_resume_from_existing_capture(out, log=lambda *_: None))
 
 
 if __name__ == "__main__":

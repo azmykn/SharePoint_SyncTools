@@ -20,6 +20,7 @@ from sp_sync.security.cookies import CookieValidator
 class TestCookiePersistenceAndValidation(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
+        self._old_db = os.environ.get("SP_SYNC_DB_PATH")
         self.db_path = os.path.join(self.tmp_dir.name, "test_cookies.sqlite")
         os.environ["SP_SYNC_DB_PATH"] = self.db_path
         from sp_sync.config.settings import clear_settings_cache
@@ -31,7 +32,10 @@ class TestCookiePersistenceAndValidation(unittest.TestCase):
     def tearDown(self):
         import sp_sync.db.store as store_mod
         store_mod._store_singleton = None
-        os.environ.pop("SP_SYNC_DB_PATH", None)
+        if self._old_db is None:
+            os.environ.pop("SP_SYNC_DB_PATH", None)
+        else:
+            os.environ["SP_SYNC_DB_PATH"] = self._old_db
         from sp_sync.config.settings import clear_settings_cache
         clear_settings_cache()
         self.tmp_dir.cleanup()

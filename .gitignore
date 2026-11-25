@@ -23,6 +23,7 @@ data/.test_cookies.sqlite
 .secure_credentials.dat
 .secure_credentials.*
 .storage_key
+.vault.key
 credentials.json
 .gdrive_token.json
 .gdrive_config.json
@@ -31,6 +32,10 @@ config/app_settings.json
 .sp_guest_link
 sync_log.txt
 sharepoint_analysis.json
+
+# Editor / manual backup clutter
+*.bak_*
+*.diff
 
 # Playwright
 .playwright/

@@ -16,7 +16,7 @@ import tempfile
 from typing import Callable, List, Optional, Tuple
 
 from sp_sync.config.settings import load_settings
-from sp_sync.sharepoint.sync_engine import (
+from sp_sync.media.ffmpeg_utils import (
     _ffprobe_duration_seconds,
     _is_valid_mp4,
     _resolve_ffprobe_path,
@@ -40,6 +40,7 @@ def silence_trim_settings() -> dict:
         "min_silence_dur": float(s.get("trim_silence_min_duration", 2.0)),
         "margin_sec": float(s.get("trim_silence_margin_sec", 3.0)),
         "merge_gap_sec": float(s.get("trim_silence_merge_gap_sec", 120.0)),
+        "keep_backup": bool(s.get("trim_silence_keep_backup", True)),
     }
 
 
@@ -55,11 +56,13 @@ def parse_silencedetect_stderr(stderr_text: str) -> List[Tuple[float, float]]:
         if m_e:
             ends.append(float(m_e.group(1)))
     pairs: List[Tuple[float, float]] = []
-    # Pair in order; if file ends in silence, last start may lack end.
+    # Pair in order; advance past stale ends earlier than current start.
     i = j = 0
     while i < len(starts):
         st = starts[i]
-        if j < len(ends) and ends[j] >= st:
+        while j < len(ends) and ends[j] < st:
+            j += 1
+        if j < len(ends):
             pairs.append((st, ends[j]))
             j += 1
             i += 1
@@ -257,6 +260,7 @@ def trim_silence_edges(
     fd, trimmed_path = tempfile.mkstemp(prefix="trim_", suffix=".mp4", dir=parent)
     os.close(fd)
     try:
+        trim_dur = max(1.0, end - start)
         cmd = [
             ff,
             "-y",
@@ -265,12 +269,14 @@ def trim_silence_edges(
             "error",
             "-ss",
             f"{start:.3f}",
-            "-to",
-            f"{end:.3f}",
             "-i",
             file_path,
+            "-t",
+            f"{trim_dur:.3f}",
             "-c",
             "copy",
+            "-avoid_negative_ts",
+            "make_zero",
             "-movflags",
             "+faststart",
             "-f",
@@ -296,12 +302,13 @@ def trim_silence_edges(
                 "keeping original"
             )
             return True
-        backup = untrimmed_backup_path(file_path)
-        if not os.path.exists(backup):
-            shutil.copy2(file_path, backup)
-            log(f"    💾 Kept untrimmed copy: {os.path.basename(backup)}")
-        else:
-            log(f"    💾 Untrimmed copy already exists: {os.path.basename(backup)}")
+        if cfg.get("keep_backup", True):
+            backup = untrimmed_backup_path(file_path)
+            if not os.path.exists(backup):
+                shutil.copy2(file_path, backup)
+                log(f"    💾 Kept untrimmed copy: {os.path.basename(backup)}")
+            else:
+                log(f"    💾 Untrimmed copy already exists: {os.path.basename(backup)}")
         os.replace(trimmed_path, file_path)
         log(f"    ✅ Silence trimmed; new duration {new_dur:.1f}s")
         return True

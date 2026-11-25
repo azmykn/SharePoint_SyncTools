@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}SharePoint | Unified Sync Tool{% endblock %}
+
+{% block content %}
+  {% if not sp_auth %}
+  <div class="notice-bar">
+    <span>🔐 <span data-i18n="expBadgeWarn">Not connected: save FedAuth and rtFa under Settings first.</span></span>
+    <a href="/settings?section=connections" class="btn btn-small" data-i18n="configureConnection">Configure Connection</a>
+  </div>
+  {% endif %}
+
+  <!-- Unified SharePoint Header: Targets | Explorer switcher + primary actions -->
+  <div class="page-header-bar">
+    <div class="subtab-bar" role="tablist">
+      <button type="button" class="subtab-btn {{ 'active' if initial_view != 'explorer' else '' }}" data-sp-view="targets" role="tab">
+        📁 <span data-i18n="spTabTargets">Sync Targets</span>
+        <span class="badge" id="sp-sync-order-num">{{ sp_active_count }}/{{ sp_total_count }}</span>
+      </button>
+      <button type="button" class="subtab-btn {{ 'active' if initial_view == 'explorer' else '' }}" data-sp-view="explorer" role="tab">
+        🔎 <span data-i18n="spTabExplorer">Explorer & Add from Link</span>
+      </button>
+    </div>
+
+    <div class="toolbar-row">
+      <button type="button" class="btn btn-outline btn-small" id="btn-sp-open-add">➕ <span data-i18n="addTargetBtn">Add Target</span></button>
+      <button type="button" class="btn btn-success btn-small" id="btn-sp-sync">🔄 <span data-i18n="syncSpNow">Sync SharePoint</span></button>
+    </div>
+  </div>
+
+  <!-- Sub-View 1: Sync Targets (FIRST & PRIMARY!) -->
+  <div id="sp-view-targets" class="subview-panel {{ 'active' if initial_view != 'explorer' else '' }}">
+    <div class="card">
+      <div class="card-header-row">
+        <div class="pill-group" id="sp-state-filter">
+          <button type="button" class="pill-btn active" data-state="all" data-i18n="filterAll">All</button>
+          <button type="button" class="pill-btn" data-state="active" data-i18n="active">Active</button>
+          <button type="button" class="pill-btn" data-state="paused" data-i18n="paused">Paused</button>
+        </div>
+        <input type="text" id="sp-filter-input" class="form-input" style="width:260px;padding:6px 10px;" data-i18n-placeholder="searchFoldersPh" placeholder="Filter targets...">
+      </div>
+      <p class="muted" style="margin-bottom:12px;" data-i18n="spSyncOrderHint">
+        Drag rows to set sync order (top runs first). Paused targets stay saved and are skipped.
+      </p>
+      <div class="item-list" id="sp-list"></div>
+    </div>
+  </div>
+
+  <!-- Sub-View 2: SharePoint Explorer (Integrated right inside SharePoint!) -->
+  <div id="sp-view-explorer" class="subview-panel {{ 'active' if initial_view == 'explorer' else '' }}">
+    <div class="card">
+      <div class="card-header" data-i18n="expCard1Title">1) Paste Sharing Link or Server Path</div>
+      <p class="muted" style="margin:6px 0 10px;" data-i18n-html="expCard1Help"></p>
+      <div class="input-with-button">
+        <input type="text" class="form-input" id="spx-paste" dir="ltr" data-i18n-placeholder="expPhPaste" placeholder="https://… or /personal/…">
+        <button type="button" class="btn" id="spx-resolve" {% if not sp_auth %}disabled{% endif %} data-i18n="expBtnResolve">Resolve Link</button>
+      </div>
+      <p class="muted" id="spx-resolve-meta" style="margin-top:8px;display:none;"></p>
+    </div>
+
+    <div class="card">
+      <div class="card-header" data-i18n="expCard2Title">2) Browse Folder & Select Targets</div>
+      <div class="form-grid" style="margin-top:10px;">
+        <div class="form-group">
+          <label for="spx-parent" data-i18n="expLabelParent">Current server-relative path</label>
+          <input type="text" class="form-input" id="spx-parent" dir="ltr" value="{{ sp_path_hint|e }}">
+        </div>
+        <div class="form-group">
+          <label for="spx-local-root" data-i18n="expLabelLocalRoot">Base local download folder</label>
+          <div class="input-with-button">
+            <input type="text" class="form-input" id="spx-local-root" dir="ltr" data-i18n-placeholder="expPhLocalRoot" placeholder="e.g. /home/user/Downloads/Courses">
+            <button type="button" class="btn btn-outline" id="btn-spx-browse-local">📂</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="toolbar-row" style="margin-top:12px;">
+        <button type="button" class="btn" id="spx-browse" {% if not sp_auth %}disabled{% endif %} data-i18n="expBtnBrowse">Browse</button>
+        <button type="button" class="btn btn-outline" id="spx-back" data-i18n="expBtnBack">Back</button>
+        <button type="button" class="btn btn-success" id="spx-bulk" data-i18n="expBtnBulk">Add Selected to Sync</button>
+        <span class="spacer"></span>
+        <input type="text" id="spx-filter" class="form-input" style="width:220px;padding:6px 10px;" data-i18n-placeholder="expFilterPh" placeholder="Filter items in this folder...">
+      </div>
+
+      <div id="spx-bc" class="breadcrumbs"></div>
+      <div id="spx-results" style="margin-top:10px;"></div>
+    </div>
+  </div>
+
+  <!-- Add / Edit SharePoint Target Modal (Keeps the targets list uncluttered!) -->
+  <div id="sp-form-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="sp-modal-title">
+    <div class="modal-card">
+      <div class="card-header-row" style="margin-bottom:14px;">
+        <div class="card-header" id="sp-modal-title" data-i18n="spAddEditTitle">Add / Edit SharePoint Target</div>
+        <button type="button" class="btn btn-outline btn-small" id="sp-modal-close">✕</button>
+      </div>
+      <form id="sp-form">
+        <input type="hidden" id="sp-edit-index" value="-1">
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="sp-name" data-i18n="spFolderName">Display Name</label>
+            <input type="text" class="form-input" id="sp-name" required>
+          </div>
+          <div class="form-group">
+            <label for="sp-entry-type" data-i18n="spEntryType">Target Type</label>
+            <select class="form-input" id="sp-entry-type">
+              <option value="folder" data-i18n="spTypeFolder">Folder (recursive)</option>
+              <option value="file" data-i18n="spTypeFile">Single File</option>
+            </select>
+          </div>
+          <div class="form-group full">
+            <label for="sp-url" data-i18n="spRelUrl">Server-Relative URL</label>
+            <input type="text" class="form-input" id="sp-url" dir="ltr" placeholder="/personal/.../Documents/CourseFolder" required>
+          </div>
+          <div class="form-group full">
+            <label for="sp-path" data-i18n="spLocalPath">Local Download Path</label>
+            <div class="input-with-button">
+              <input type="text" class="form-input" id="sp-path" dir="ltr" required>
+              <button type="button" class="btn btn-outline" id="btn-sp-browse-local">📂</button>
+            </div>
+          </div>
+          <div class="form-group full">
+            <label for="sp-sharing-link" data-i18n="spSharingLink">Per-Folder Sharing Link (optional :f:/ link)</label>
+            <input type="text" class="form-input" id="sp-sharing-link" dir="ltr" placeholder="https://...sharepoint.com/:f:/g/...">
+          </div>
+          <div class="form-group full" id="sp-local-flat-wrap">
+            <label class="checkbox-row">
+              <input type="checkbox" id="sp-local-flat">
+              <span data-i18n="spLocalFlat">Flat mode — download directly into local path without creating a cloud-named subfolder</span>
+            </label>
+          </div>
+          <div class="form-group full">
+            <label class="checkbox-row">
+              <input type="checkbox" id="sp-video-only">
+              <span data-i18n="spVideoOnly">Videos only — skip non-video files (PDF/PPTX/etc.)</span>
+            </label>
+          </div>
+        </div>
+        <div class="form-actions" style="justify-content:flex-end;">
+          <button type="button" class="btn btn-outline" id="sp-cancel-btn" data-i18n="cancel">Cancel</button>
+          <button type="submit" class="btn" id="sp-submit-btn" data-i18n="saveFolder">Save Target</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script>
+    window.__INITIAL_SP_FOLDERS__ = {{ sp_folders|tojson if sp_folders else '[]' }};
+    window.__INITIAL_SP_VIEW__ = {{ initial_view|tojson }};
+  </script>
+  <script defer src="{{ url_for('static', filename='js/folders.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/explorer.js') }}"></script>
+{% endblock %}

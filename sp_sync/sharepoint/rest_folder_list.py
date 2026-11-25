@@ -9,11 +9,14 @@ optional $expand fallback, and __next pagination for large folders.
 from __future__ import annotations
 
 import base64
+import logging
 import random
 import time
 import unicodedata
 import urllib.parse
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 # Pagination safety caps
 _MAX_PAGES = 50
@@ -104,8 +107,12 @@ def normalize_server_relative_folder_path(raw: str) -> str:
 
 
 def encode_path_for_get_folder_param(server_relative_path: str) -> str:
-    """Percent-encode path for use inside GetFolderByServerRelativeUrl('...'); keep '/' unencoded."""
-    return urllib.parse.quote(server_relative_path, safe="/")
+    """Percent-encode path for use inside GetFolderByServerRelativeUrl('...'); keep '/' unencoded.
+
+    OData string literals require single quotes to be doubled (' -> '') before percent-encoding.
+    """
+    escaped = (server_relative_path or "").replace("'", "''")
+    return urllib.parse.quote(escaped, safe="/")
 
 
 def _parse_collection_page(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
@@ -229,6 +236,18 @@ def _folder_rows(folder_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _coerce_int_size(raw: Any) -> int:
+    """Safely coerce SharePoint Length / size (which OData often sends as a string) to int."""
+    if isinstance(raw, bool) or raw is None:
+        return 0
+    if isinstance(raw, int):
+        return max(0, raw)
+    try:
+        return max(0, int(float(str(raw).strip())))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _file_rows(file_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for fi in file_items:
@@ -237,7 +256,7 @@ def _file_rows(file_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rel = rel.replace("\\", "/")
         if not name or not rel:
             continue
-        size = fi.get("Length", 0)
+        size = _coerce_int_size(fi.get("Length", 0))
         modified = (
             fi.get("TimeLastModified")
             or fi.get("Modified")
@@ -245,7 +264,10 @@ def _file_rows(file_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             or fi.get("lastModifiedDateTime")
             or ""
         )
-        row = {"name": name, "rel_url": rel, "size": size}
+        row: dict[str, Any] = {"name": name, "rel_url": rel, "size": size}
+        uid = fi.get("UniqueId") or fi.get("uniqueId")
+        if isinstance(uid, str) and uid.strip():
+            row["item_id"] = uid.strip()
         if modified:
             row["modified"] = modified
         out.append(row)
@@ -278,6 +300,7 @@ def _fetch_split_children_by_urls(
             "body_snippet": snippet,
             "content_type": ct,
             "upstream_http_status": st_f,
+            "request_url": folders_url,
         }
 
     res_fl = fetch_odata_collection_all_pages(
@@ -295,6 +318,7 @@ def _fetch_split_children_by_urls(
             "body_snippet": snippet,
             "content_type": ct,
             "upstream_http_status": st_fl,
+            "request_url": files_url,
         }
 
     return {
@@ -427,96 +451,94 @@ def _v2_shares_list_children(
             parent_item_id=parent_item_id,
             share_root_norm=share_root_norm,
         )
-        prev_accept = session.headers.get("Accept")
-        session.headers["Accept"] = "application/json"
-        try:
-            val: list[dict[str, Any]] = []
-            cur_url: str | None = url
-            pages = 0
-            last_ct = None
+        req_headers = {"Accept": "application/json"}
+        val: list[dict[str, Any]] = []
+        cur_url: str | None = url
+        pages = 0
+        last_ct = None
 
-            while cur_url and pages < _MAX_PAGES and len(val) < _MAX_ITEMS:
-                pages += 1
-                r = _request_get_with_retry(session, cur_url, timeout=timeout, retries=2)
-                st = r.status_code
-                last_ct = (r.headers.get("Content-Type") or "").split(";")[0].strip() or None
-                if st != 200:
-                    snippet = (r.text or "")[:500].replace("\n", " ")
-                    return {
-                        "ok": False,
-                        "normalized_parent": normalize_server_relative_folder_path(parent_norm),
-                        "folders": [],
-                        "files": [],
-                        "error": f"Shares API HTTP {st}",
-                        "body_snippet": snippet,
-                        "content_type": last_ct,
-                        "method": "v2_shares",
-                        "upstream_http_status": st,
-                    }
-                try:
-                    j = r.json()
-                except ValueError:
-                    snippet = (r.text or "")[:500].replace("\n", " ")
-                    return {
-                        "ok": False,
-                        "normalized_parent": normalize_server_relative_folder_path(parent_norm),
-                        "folders": [],
-                        "files": [],
-                        "error": "Shares API returned non-JSON body",
-                        "body_snippet": snippet,
-                        "content_type": last_ct,
-                        "method": "v2_shares",
-                        "upstream_http_status": st,
-                    }
-                batch = j.get("value")
-                if isinstance(batch, list):
-                    val.extend(batch)
-                nxt = j.get("@odata.nextLink") or j.get("odata.nextLink")
-                cur_url = nxt.strip() if isinstance(nxt, str) and nxt.strip() else None
+        while cur_url and pages < _MAX_PAGES and len(val) < _MAX_ITEMS:
+            pages += 1
+            r = _request_get_with_retry(
+                session, cur_url, timeout=timeout, headers=req_headers, retries=2
+            )
+            st = r.status_code
+            last_ct = (r.headers.get("Content-Type") or "").split(";")[0].strip() or None
+            if st != 200:
+                snippet = (r.text or "")[:500].replace("\n", " ")
+                return {
+                    "ok": False,
+                    "normalized_parent": normalize_server_relative_folder_path(parent_norm),
+                    "folders": [],
+                    "files": [],
+                    "error": f"Shares API HTTP {st}",
+                    "body_snippet": snippet,
+                    "content_type": last_ct,
+                    "method": "v2_shares",
+                    "upstream_http_status": st,
+                    "request_url": cur_url,
+                }
+            try:
+                j = r.json()
+            except ValueError:
+                snippet = (r.text or "")[:500].replace("\n", " ")
+                return {
+                    "ok": False,
+                    "normalized_parent": normalize_server_relative_folder_path(parent_norm),
+                    "folders": [],
+                    "files": [],
+                    "error": "Shares API returned non-JSON body",
+                    "body_snippet": snippet,
+                    "content_type": last_ct,
+                    "method": "v2_shares",
+                    "upstream_http_status": st,
+                    "request_url": cur_url,
+                }
+            batch = j.get("value")
+            if isinstance(batch, list):
+                val.extend(batch)
+            nxt = j.get("@odata.nextLink") or j.get("odata.nextLink")
+            cur_url = nxt.strip() if isinstance(nxt, str) and nxt.strip() else None
 
-            parent = normalize_server_relative_folder_path(parent_norm)
-            folders_out: list[dict[str, Any]] = []
-            files_out: list[dict[str, Any]] = []
-            for item in val:
-                if not isinstance(item, dict):
-                    continue
-                name = _nfc(item.get("name") or "")
-                if not name or name == "Forms" or name.startswith("_"):
-                    continue
-                is_folder = isinstance(item.get("folder"), dict)
-                rel = parent.rstrip("/") + "/" + name
-                if is_folder:
-                    row = {"name": name, "rel_url": rel.replace("\\", "/")}
-                    item_id = item.get("id")
-                    if isinstance(item_id, str) and item_id.strip():
-                        row["item_id"] = item_id.strip()
-                    folders_out.append(row)
-                else:
-                    sz = item.get("size", 0) or 0
-                    row = {"name": name, "rel_url": rel.replace("\\", "/"), "size": sz}
-                    item_id = item.get("id")
-                    if isinstance(item_id, str) and item_id.strip():
-                        row["item_id"] = item_id.strip()
-                    modified = item.get("lastModifiedDateTime") or item.get("createdDateTime") or ""
-                    if modified:
-                        row["modified"] = modified
-                    files_out.append(row)
-            return {
-                "ok": True,
-                "normalized_parent": parent,
-                "folders": folders_out,
-                "files": files_out,
-                "error": "",
-                "body_snippet": "",
-                "content_type": last_ct,
-                "method": "v2_shares",
-            }
-        finally:
-            if prev_accept:
-                session.headers["Accept"] = prev_accept
+        parent = normalize_server_relative_folder_path(parent_norm)
+        folders_out: list[dict[str, Any]] = []
+        files_out: list[dict[str, Any]] = []
+        for item in val:
+            if not isinstance(item, dict):
+                continue
+            name = _nfc(item.get("name") or "")
+            if not name or name == "Forms" or name.startswith("_"):
+                continue
+            is_folder = isinstance(item.get("folder"), dict)
+            rel = parent.rstrip("/") + "/" + name
+            if is_folder:
+                row = {"name": name, "rel_url": rel.replace("\\", "/")}
+                item_id = item.get("id")
+                if isinstance(item_id, str) and item_id.strip():
+                    row["item_id"] = item_id.strip()
+                folders_out.append(row)
             else:
-                session.headers["Accept"] = "application/json;odata=verbose"
-    except Exception:
+                sz = _coerce_int_size(item.get("size", 0))
+                row = {"name": name, "rel_url": rel.replace("\\", "/"), "size": sz}
+                item_id = item.get("id")
+                if isinstance(item_id, str) and item_id.strip():
+                    row["item_id"] = item_id.strip()
+                modified = item.get("lastModifiedDateTime") or item.get("createdDateTime") or ""
+                if modified:
+                    row["modified"] = modified
+                files_out.append(row)
+        return {
+            "ok": True,
+            "normalized_parent": parent,
+            "folders": folders_out,
+            "files": files_out,
+            "error": "",
+            "body_snippet": "",
+            "content_type": last_ct,
+            "method": "v2_shares",
+        }
+    except Exception as exc:
+        _logger.warning("v2_shares listing failed unexpectedly for %s: %s", parent_norm, exc)
         return None
 
 
@@ -591,8 +613,12 @@ def list_folder_children_rest(
 
     # 1) Try single GET with $expand=Folders,Files (one round-trip, consistent snapshot)
     expand_url = api_root + "?$expand=Folders,Files"
-    r_exp = session.get(expand_url, timeout=timeout)
-    if r_exp.status_code == 200:
+    r_exp = None
+    try:
+        r_exp = _request_get_with_retry(session, expand_url, timeout=timeout, retries=2)
+    except Exception as exc:
+        _logger.warning("SharePoint $expand request failed for %s: %s", norm, exc)
+    if r_exp is not None and r_exp.status_code == 200:
         try:
             exp_json = r_exp.json()
         except ValueError:
@@ -651,6 +677,7 @@ def list_folder_children_rest(
             "content_type": split.get("content_type"),
             "method": method_used,
             "upstream_http_status": split.get("upstream_http_status"),
+            "request_url": split.get("request_url") or api_root,
         }
 
     folders_raw = split["folders_raw"]

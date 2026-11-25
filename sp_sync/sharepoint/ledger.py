@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Callable, Iterable, Optional
 
 from sp_sync.db.store import ledger_key
@@ -31,6 +32,13 @@ def _noop(_msg: str) -> None:
 
 def _row_key(row: dict) -> str:
     return ledger_key(row.get("item_id"), row.get("rel_url"))
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """Normalize naive/aware datetimes to naive UTC for safe chronological sorting."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _local_size(path: str) -> int:
@@ -135,7 +143,7 @@ def backfill_folder(store, download_dir: str, files: Iterable[dict], log: Option
         locals_ = sorted(local_by_date.get(date, []))
         if not locals_:
             continue
-        remotes = sorted(remotes, key=lambda t: t[0])
+        remotes = sorted(remotes, key=lambda t: _naive_utc(t[0]))
         # exact size match first
         for when, r in list(remotes):
             size = int(r.get("size") or 0)
@@ -163,7 +171,15 @@ def backfill_folder(store, download_dir: str, files: Iterable[dict], log: Option
     return recorded
 
 
-def plan_download(store, download_dir: str, row: dict, log: Optional[LogFn] = None) -> Optional[str]:
+def plan_download(
+    store,
+    download_dir: str,
+    row: dict,
+    log: Optional[LogFn] = None,
+    *,
+    dry_run: bool = False,
+    out_meta: Optional[dict] = None,
+) -> Optional[str]:
     """Return the local path to download *row* to, or ``None`` to skip it (in ledger)."""
     log = log or _noop
     name = row.get("name") or ""
@@ -184,16 +200,19 @@ def plan_download(store, download_dir: str, row: dict, log: Optional[LogFn] = No
                 download_dir, name, modified=row.get("modified"),
                 extra_names=ledger_names_for(store, download_dir),
             )
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        if os.path.exists(target):
-            stem, ext = os.path.splitext(target)
-            aside = f"{stem}_old{ext}"
-            i = 2
-            while os.path.exists(aside):
-                aside = f"{stem}_old{i}{ext}"
-                i += 1
-            os.rename(target, aside)
-            log(f"  ↪ Re-download requested: kept current copy as '{os.path.basename(aside)}'")
+        if not dry_run:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if os.path.exists(target):
+                stem, ext = os.path.splitext(target)
+                aside = f"{stem}_old{ext}"
+                i = 2
+                while os.path.exists(aside):
+                    aside = f"{stem}_old{i}{ext}"
+                    i += 1
+                os.rename(target, aside)
+                if out_meta is not None:
+                    out_meta["aside_path"] = aside
+                log(f"  ↪ Re-download requested: kept current copy as '{os.path.basename(aside)}'")
         return target
     folder_hint = os.path.basename(os.path.abspath(download_dir.rstrip("/\\"))) or ""
     target = preferred_download_path(
@@ -203,8 +222,24 @@ def plan_download(store, download_dir: str, row: dict, log: Optional[LogFn] = No
         modified=row.get("modified"),
         extra_names=ledger_names_for(store, download_dir),
     )
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    if not dry_run:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
     return target
+
+
+def restore_redownload_aside(
+    target: str, aside_path: Optional[str], log: Optional[LogFn] = None
+) -> bool:
+    """Restore ``*_old`` backup back to *target* if a re-download failed before producing a new file."""
+    log = log or _noop
+    if not aside_path or not os.path.isfile(aside_path) or os.path.exists(target):
+        return False
+    try:
+        os.rename(aside_path, target)
+        log(f"  ↩ Restored previous copy '{os.path.basename(target)}' after failed re-download")
+        return True
+    except OSError:
+        return False
 
 
 def record_after_download(

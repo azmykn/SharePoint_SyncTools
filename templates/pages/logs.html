@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Activity Log | Unified Sync Tool{% endblock %}
+
+{% block content %}
+  <div class="logs-page-wrap">
+    <div class="card logs-toolbar-card">
+      <div class="toolbar-row">
+        <button type="button" class="live-pill" id="btn-log-live-toggle" title="Pause or resume real-time tracking">
+          <span class="live-dot"></span>
+          <span id="log-live-label" data-i18n="logLiveOn">LIVE</span>
+        </button>
+
+        <span class="badge" id="log-count-badge">0</span>
+
+        <button type="button" class="btn btn-small btn-outline active" id="btn-log-order-toggle" title="Toggle newest first or tail bottom">
+          ⬇️ <span id="log-order-label" data-i18n="logNewestFirst">Newest First</span>
+        </button>
+
+        <div class="pill-group">
+          <button type="button" class="pill-btn active" data-log-source="all" data-i18n="logAll">All</button>
+          <button type="button" class="pill-btn" data-log-source="sharepoint" data-i18n="logSp">SharePoint</button>
+          <button type="button" class="pill-btn" data-log-source="gdrive" data-i18n="logGd">Google Drive</button>
+          <button type="button" class="pill-btn" data-log-source="system" data-i18n="logSys">System</button>
+        </div>
+
+        <select id="log-level-filter" class="form-input" style="width:auto;padding:5px 10px;">
+          <option value="all" data-i18n="logLevelAll">Level: All</option>
+          <option value="success">✅ Success</option>
+          <option value="warning">⚠️ Warnings</option>
+          <option value="error">❌ Errors</option>
+        </select>
+
+        <input type="text" id="log-search-input" class="form-input" style="width:190px;padding:5px 10px;" data-i18n-placeholder="logSearchPh" placeholder="Filter log lines...">
+
+        <span class="spacer"></span>
+        <button type="button" class="btn btn-small btn-outline" id="btn-log-copy">📋 <span data-i18n="logCopy">Copy</span></button>
+        <button type="button" class="btn btn-small btn-outline" id="btn-log-download">⬇️ <span data-i18n="logDownload">Download</span></button>
+        <button type="button" class="btn btn-small btn-danger" id="btn-log-clear">🧹 <span data-i18n="logClear">Clear</span></button>
+      </div>
+    </div>
+
+    <div class="terminal-shell">
+      <button type="button" class="jump-latest-btn" id="btn-jump-latest">
+        ⬆️ <span id="jump-latest-text">New lines</span>
+      </button>
+      <div class="terminal-live" id="terminal"></div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script defer src="{{ url_for('static', filename='js/logs.js') }}"></script>
+{% endblock %}

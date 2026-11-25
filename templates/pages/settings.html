@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+{% block title %}Settings | Unified Sync Tool{% endblock %}
+
+{% block content %}
+  <!-- Clean 3-Section Settings Bar (No giant vertical wall!) -->
+  <div class="page-header-bar">
+    <div class="subtab-bar" role="tablist">
+      <button type="button" class="subtab-btn {{ 'active' if initial_section == 'connections' else '' }}" data-settings-section="connections" role="tab">
+        🔐 <span data-i18n="setTabConnections">Connections</span>
+      </button>
+      <button type="button" class="subtab-btn {{ 'active' if initial_section == 'automation' else '' }}" data-settings-section="automation" role="tab">
+        ⏱️ <span data-i18n="setTabAutomation">Automation & Video</span>
+      </button>
+      <button type="button" class="subtab-btn {{ 'active' if initial_section == 'health' else '' }}" data-settings-section="health" role="tab">
+        🩺 <span data-i18n="setTabHealth">Health & Backup</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- SECTION 1: Connections (Single Source of Truth for SharePoint & Google Drive Auth) -->
+  <div id="settings-sec-connections" class="subview-panel settings-stack {{ 'active' if initial_section == 'connections' else '' }}">
+    <!-- SharePoint Connection -->
+    <div class="card">
+      <div class="card-header-row">
+        <div class="card-header">🌐 <span data-i18n="setSpTitle">SharePoint Connection</span></div>
+        {% if sp_auth %}
+          <span class="badge badge-ok">✅ <span data-i18n="connected">Connected</span> ({{ fedauth_len }}/{{ rtfa_len }})</span>
+        {% else %}
+          <span class="badge badge-err">❌ <span data-i18n="disconnected">Not connected</span></span>
+        {% endif %}
+      </div>
+
+      <form id="form-sp-site-url" style="margin-bottom:16px;">
+        <div class="form-group">
+          <label for="sp-site-url-manual" data-i18n="setSiteUrlLabel">SharePoint Site Root URL</label>
+          <div class="input-with-button">
+            <input type="text" class="form-input" id="sp-site-url-manual" dir="ltr"
+                   placeholder="https://tenant-my.sharepoint.com/personal/user_tenant_onmicrosoft_com"
+                   value="{{ sp_site_url_display|e }}">
+            <button type="submit" class="btn btn-outline" data-i18n="setSaveSiteUrl">Save Site URL</button>
+          </div>
+        </div>
+      </form>
+
+      <form id="form-sp-guest-link" style="margin-bottom:16px;">
+        <div class="form-group">
+          <label for="sp-guest-link" data-i18n="setGuestLinkLabel">Default Guest Sharing Link (:f:/ — optional)</label>
+          <div class="input-with-button">
+            <input type="text" class="form-input" id="sp-guest-link" dir="ltr"
+                   placeholder="https://...sharepoint.com/:f:/g/..."
+                   value="{{ sp_guest_link_display|e }}">
+            <button type="submit" class="btn btn-outline" data-i18n="setSaveGuestLink">Save Guest Link</button>
+          </div>
+          <label class="checkbox-row" style="margin-top:6px;">
+            <input type="checkbox" id="sp-guest-apply-all">
+            <span class="muted" data-i18n="setGuestApplyAll">Also overwrite existing per-folder sharing links (use carefully)</span>
+          </label>
+        </div>
+      </form>
+
+      <form id="form-sp-cookies">
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="sp-fedauth" data-i18n="setFedAuth">FedAuth Cookie</label>
+            <input type="password" class="form-input" id="sp-fedauth" dir="ltr" autocomplete="off"
+                   placeholder="{% if fedauth_len %}Saved ({{ fedauth_len }} chars) — paste to replace{% else %}Paste FedAuth cookie...{% endif %}">
+          </div>
+          <div class="form-group">
+            <label for="sp-rtfa" data-i18n="setRtFa">rtFa Cookie</label>
+            <input type="password" class="form-input" id="sp-rtfa" dir="ltr" autocomplete="off"
+                   placeholder="{% if rtfa_len %}Saved ({{ rtfa_len }} chars) — paste to replace{% else %}Paste rtFa cookie...{% endif %}">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn" data-i18n="setSaveCookies">Save Cookies</button>
+          <button type="button" class="btn btn-outline" id="btn-test-sp-cookies">🩺 <span data-i18n="setTestCookies">Test Live Connection</span></button>
+          {% if sp_auto_cookies_supported %}
+          <button type="button" class="btn btn-success" id="btn-auto-cookies">🔄 <span data-i18n="setAutoCookies">Extract from Chrome/Edge (Windows)</span></button>
+          {% endif %}
+        </div>
+        <div id="sp-cookie-test-result" style="display:none;margin-top:10px;"></div>
+      </form>
+    </div>
+
+    <!-- Google Drive Connection & credentials.json -->
+    <div class="card">
+      <div class="card-header-row">
+        <div class="card-header">📁 <span data-i18n="setGdTitle">Google Drive Connection & Credentials</span></div>
+        {% if gd_auth %}
+          <span class="badge badge-ok">✅ {{ gd_user or 'Connected' }}</span>
+        {% else %}
+          <span class="badge badge-err">❌ <span data-i18n="disconnected">Not connected</span></span>
+        {% endif %}
+      </div>
+
+      <div class="toolbar-row" style="margin-bottom:14px;">
+        {% if gd_auth %}
+          <button type="button" class="btn btn-outline" data-gd-auth-disconnect>🚪 <span data-i18n="gdDisconnect">Disconnect</span></button>
+          <button type="button" class="btn btn-outline" data-gd-auth-start>🔄 Re-authenticate</button>
+        {% else %}
+          <button type="button" class="btn" data-gd-auth-start>🔐 <span data-i18n="gdSignIn">Sign in with Google</span></button>
+          <a href="/gdrive/auth_page" class="btn btn-outline" data-i18n="gdManualAuthBtn">Manual Auth Code</a>
+        {% endif %}
+        <span class="badge {{ 'badge-ok' if gd_has_credentials else 'badge-warn' }}">
+          credentials.json: {{ 'Present' if gd_has_credentials else 'Missing' }}
+        </span>
+      </div>
+
+      <div id="gd-auth-live" style="display:none;padding:12px;border-radius:8px;background:var(--accent-soft);margin-bottom:14px;">
+        <strong>⏳ Waiting for Google authorization...</strong>
+        <div style="margin-top:4px;"><a id="gd-auth-direct" href="#" target="_blank" style="color:var(--accent);">Open authorization tab ↗</a></div>
+      </div>
+
+      <details>
+        <summary style="cursor:pointer;font-weight:600;color:var(--text-secondary);" data-i18n="gdUploadCreds">Upload credentials.json</summary>
+        <form id="form-gd-creds" style="margin-top:10px;">
+          <div class="form-grid">
+            <div class="form-group">
+              <label for="gd-creds-file">Select credentials.json file</label>
+              <input type="file" id="gd-creds-file" accept=".json" class="form-input">
+            </div>
+            <div class="form-group full">
+              <label for="gd-creds-text">Or paste JSON content directly</label>
+              <textarea id="gd-creds-text" rows="3" class="form-input" dir="ltr" placeholder='{"installed": {...}}'></textarea>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn btn-outline btn-small" data-i18n="gdUploadCreds">Upload credentials.json</button>
+          </div>
+        </form>
+      </details>
+    </div>
+  </div>
+
+  <!-- SECTION 2: Automation & Video -->
+  <div id="settings-sec-automation" class="subview-panel settings-stack {{ 'active' if initial_section == 'automation' else '' }}">
+    <!-- Automated Background Scheduler -->
+    <div class="card">
+      <div class="card-header-row">
+        <div class="card-header">⏱️ <span data-i18n="setSchedTitle">Automated Background Scheduler</span></div>
+        <div class="toolbar-row">
+          <span class="status-chip" id="scheduler-daemon-chip">Daemon: ...</span>
+          <span class="status-chip" id="scheduler-due-chip">Due: --</span>
+        </div>
+      </div>
+
+      <form id="scheduler-form">
+        <div class="form-group" style="margin-bottom:12px;">
+          <label class="checkbox-row">
+            <input type="checkbox" id="scheduler-enabled" {% if scheduler_settings and scheduler_settings.enabled %}checked{% endif %}>
+            <strong data-i18n="setSchedEnable">Enable automatic scheduled sync</strong>
+          </label>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label for="scheduler-mode" data-i18n="setSchedMode">Schedule Mode</label>
+            <select class="form-input" id="scheduler-mode">
+              <option value="daily" {% if not scheduler_settings or scheduler_settings.schedule_mode == 'daily' %}selected{% endif %} data-i18n="setSchedModeDaily">Daily at fixed time</option>
+              <option value="interval" {% if scheduler_settings and scheduler_settings.schedule_mode == 'interval' %}selected{% endif %} data-i18n="setSchedModeInterval">Every N hours</option>
+            </select>
+          </div>
+
+          <div class="form-group" id="scheduler-daily-wrap">
+            <label for="scheduler-daily-time" data-i18n="setSchedDailyTime">Daily Run Time (24h)</label>
+            <input type="time" class="form-input" id="scheduler-daily-time"
+                   value="{{ scheduler_settings.daily_time if scheduler_settings and scheduler_settings.daily_time else '02:00' }}">
+          </div>
+
+          <div class="form-group" id="scheduler-interval-wrap">
+            <label for="scheduler-interval" data-i18n="setSchedInterval">Interval</label>
+            <select class="form-input" id="scheduler-interval">
+              {% for h in [1, 2, 4, 6, 12, 24] %}
+              <option value="{{ h }}" {% if scheduler_settings and scheduler_settings.interval_hours == h %}selected{% endif %}>Every {{ h }} hour(s)</option>
+              {% endfor %}
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="scheduler-target" data-i18n="setSchedTarget">Target Services</label>
+            <select class="form-input" id="scheduler-target">
+              <option value="all" {% if not scheduler_settings or scheduler_settings.target == 'all' %}selected{% endif %}>All (SharePoint & Google Drive)</option>
+              <option value="sharepoint" {% if scheduler_settings and scheduler_settings.target == 'sharepoint' %}selected{% endif %}>SharePoint Only</option>
+              <option value="gdrive" {% if scheduler_settings and scheduler_settings.target == 'gdrive' %}selected{% endif %}>Google Drive Only</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toolbar-row muted" style="margin-top:10px;">
+          <span id="scheduler-last-run">{{ ('Last run: ' ~ scheduler_settings.last_run) if scheduler_settings and scheduler_settings.last_run else 'No scheduled runs recorded yet.' }}</span>
+          <span>•</span>
+          <span id="scheduler-next-run">Next run: {{ scheduler_settings.next_run if scheduler_settings and scheduler_settings.next_run else '--' }}</span>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" class="btn" data-i18n="setSchedSave">Save Scheduler</button>
+          <button type="button" class="btn btn-outline" id="btn-sched-run-now">▶️ <span data-i18n="setSchedRunNow">Run Now</span></button>
+          <button type="button" class="btn btn-outline" id="btn-sched-refresh" data-i18n="refresh">Refresh</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Video Verification & Silence Trimming -->
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">✂️ <span data-i18n="setProcTitle">Video Verification & Silence Trimming</span></div>
+      <form id="form-app-settings">
+        <div class="form-grid">
+          <div class="form-group full">
+            <label class="checkbox-row">
+              <input type="checkbox" id="cfg-trim-enabled" {% if app_settings and app_settings.trim_silence_enabled %}checked{% endif %}>
+              <span data-i18n="setTrimEnable">Trim leading & trailing silence automatically after video download</span>
+            </label>
+          </div>
+          <div class="form-group full">
+            <label class="checkbox-row">
+              <input type="checkbox" id="cfg-trim-keep-backup" {% if not app_settings or app_settings.trim_silence_keep_backup %}checked{% endif %}>
+              <span data-i18n="setTrimKeepBackup">Keep .untrimmed.mp4 backup copy next to trimmed video</span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label for="cfg-trim-noise" data-i18n="setTrimNoise">Silence Threshold (dB)</label>
+            <input type="number" step="1" min="-100" max="-10" class="form-input" id="cfg-trim-noise" value="{{ app_settings.trim_silence_noise_db if app_settings else -70 }}">
+          </div>
+          <div class="form-group">
+            <label for="cfg-trim-min-dur" data-i18n="setTrimMinDur">Min Silence Duration (s)</label>
+            <input type="number" step="0.5" min="0.5" max="60" class="form-input" id="cfg-trim-min-dur" value="{{ app_settings.trim_silence_min_duration if app_settings else 2.0 }}">
+          </div>
+          <div class="form-group">
+            <label for="cfg-trim-margin" data-i18n="setTrimMargin">Speech Margin (s)</label>
+            <input type="number" step="0.5" min="0" max="60" class="form-input" id="cfg-trim-margin" value="{{ app_settings.trim_silence_margin_sec if app_settings else 3.0 }}">
+          </div>
+          <div class="form-group">
+            <label for="cfg-trim-gap" data-i18n="setTrimGap">Merge Gap (s)</label>
+            <input type="number" step="1" min="0" max="1800" class="form-input" id="cfg-trim-gap" value="{{ app_settings.trim_silence_merge_gap_sec if app_settings else 120.0 }}">
+          </div>
+          <div class="form-group">
+            <label for="cfg-dur-pct" data-i18n="setDurPct">Duration Tolerance (%)</label>
+            <input type="number" step="0.5" min="0" max="50" class="form-input" id="cfg-dur-pct" value="{{ ((app_settings.duration_tolerance_pct if app_settings else 0.02) * 100)|round(1) }}">
+          </div>
+          <div class="form-group">
+            <label for="cfg-dur-sec" data-i18n="setDurSec">Duration Tolerance (s)</label>
+            <input type="number" step="1" min="0" max="600" class="form-input" id="cfg-dur-sec" value="{{ app_settings.duration_tolerance_seconds if app_settings else 30.0 }}">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn" data-i18n="setSaveProc">Save Processing Settings</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Desktop Notifications -->
+    <div class="card">
+      <div class="card-header-row" style="margin:0;">
+        <div class="card-header">🔔 <span data-i18n="setNotifyTitle">Desktop Notifications</span></div>
+        <div class="toolbar-row">
+          <span id="notify-status-text" class="muted">Checking...</span>
+          <button type="button" class="btn btn-outline btn-small" id="btn-request-notify" data-i18n="setEnableNotify">Enable Desktop Notifications</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SECTION 3: Health & Backup -->
+  <div id="settings-sec-health" class="subview-panel settings-stack {{ 'active' if initial_section == 'health' else '' }}">
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">🩺 <span data-i18n="setHealthTitle">System Health, Maintenance & Backup</span></div>
+      <div class="health-grid" id="health-grid"></div>
+
+      <div class="toolbar-row" style="margin-top:14px;">
+        <button type="button" class="btn btn-outline btn-small" id="btn-validate-configs">✔️ <span data-i18n="setCheckConfigs">Validate All Configs</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-clean-empty-tmp">🧹 <span data-i18n="setCleanEmptyTmp">Clean Empty Temp Dirs</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-clean-old-tmp">🗑️ <span data-i18n="setCleanAllTmp">Purge Old Temp Segments (>24h)</span></button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-export-backup">⬇️ <span data-i18n="setExportBackup">Export Backup JSON</span></button>
+        <label class="btn btn-outline btn-small" style="cursor:pointer;">
+          ⬆️ <span data-i18n="setImportBackup">Import Backup JSON</span>
+          <input type="file" id="backup-import-file" accept=".json" style="display:none;">
+        </label>
+      </div>
+
+      <div id="config-validation-output" style="display:none;margin-top:12px;padding:12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border);"></div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script>
+    window.__INITIAL_SETTINGS_SECTION__ = {{ initial_section|tojson }};
+  </script>
+  <script defer src="{{ url_for('static', filename='js/settings.js') }}"></script>
+{% endblock %}

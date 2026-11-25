@@ -57,7 +57,11 @@ def _get_encryption_key(browser_local_state_path):
 def _decrypt_cookie_value(encrypted_value, key):
     """Decrypt a cookie value using AES-GCM with the provided key."""
     try:
-        if encrypted_value[:3] == b'v10' or encrypted_value[:3] == b'v20':
+        prefix = encrypted_value[:3]
+        if prefix == b"v20":
+            # Chrome 127+ App-Bound Encryption cannot be decrypted with the legacy v10 DPAPI key.
+            return "__APP_BOUND_V20__"
+        if prefix == b'v10':
             # AES-256-GCM
             nonce = encrypted_value[3:15]
             ciphertext = encrypted_value[15:-16]
@@ -98,119 +102,138 @@ def _decrypt_cookie_value(encrypted_value, key):
         return None
 
 
+def _candidate_cookie_dbs(user_data_dir):
+    """Locate cookie DBs across Default and Profile * directories."""
+    profiles = ["Default"]
+    try:
+        for entry in sorted(os.listdir(user_data_dir)):
+            if entry.startswith("Profile ") and os.path.isdir(os.path.join(user_data_dir, entry)):
+                profiles.append(entry)
+    except OSError:
+        pass
+    out = []
+    for prof in profiles:
+        for rel in (os.path.join(prof, "Network", "Cookies"), os.path.join(prof, "Cookies")):
+            p = os.path.join(user_data_dir, rel)
+            if os.path.isfile(p):
+                out.append((prof, p))
+                break
+    return out
+
+
 def _extract_from_browser(browser_name, user_data_dir, local_state_path):
-    """Extract SharePoint cookies from a Chromium-based browser."""
-    results = {'fedauth': '', 'rtfa': '', 'found_cookies': 0}
-    
-    # Find cookie database
-    cookie_paths = []
-    if browser_name == 'Edge':
-        cookie_paths = [
-            os.path.join(user_data_dir, 'Default', 'Network', 'Cookies'),
-            os.path.join(user_data_dir, 'Default', 'Cookies'),
-        ]
-    else:  # Chrome
-        cookie_paths = [
-            os.path.join(user_data_dir, 'Default', 'Network', 'Cookies'),
-            os.path.join(user_data_dir, 'Default', 'Cookies'),
-        ]
-    
-    cookie_db = None
-    for p in cookie_paths:
-        if os.path.exists(p):
-            cookie_db = p
-            break
-    
-    if not cookie_db:
+    """Extract SharePoint cookies from a Chromium-based browser across all profiles."""
+    results = {'fedauth': '', 'rtfa': '', 'found_cookies': 0, 'profile': '', 'app_bound': False}
+
+    cookie_dbs = _candidate_cookie_dbs(user_data_dir)
+    if not cookie_dbs:
         return results, f"No Cookies database found for {browser_name}"
-    
-    # Get encryption key
+
     key = _get_encryption_key(local_state_path)
     if not key:
         return results, f"Could not read encryption key for {browser_name}"
-    
-    # Copy cookie DB to temp (to avoid locking issues when browser is running)
-    tmp_db = os.path.join(tempfile.gettempdir(), f'sp_cookies_{browser_name.lower()}.db')
-    copy_success = False
-    
-    # Method 1: Direct copy (works if browser is closed)
-    try:
-        shutil.copy2(cookie_db, tmp_db)
-        copy_success = True
-    except (PermissionError, OSError):
-        pass
-    
-    # Method 2: Use shadowcopy package (Windows VSS)
-    if not copy_success:
-        try:
-            import shadowcopy
-            shadowcopy.copy(cookie_db, tmp_db)
-            copy_success = True
-        except Exception:
-            pass
-    
-    # Method 3: PowerShell-based raw copy (bypasses some locks)
-    if not copy_success:
-        try:
-            import subprocess
-            # Use .NET File class to read locked files
-            ps_cmd = (
-                f'$bytes = [System.IO.File]::ReadAllBytes("{cookie_db}"); '
-                f'[System.IO.File]::WriteAllBytes("{tmp_db}", $bytes)'
-            )
-            result_ps = subprocess.run(
-                ['powershell', '-Command', ps_cmd],
-                capture_output=True, timeout=10
-            )
-            if result_ps.returncode == 0 and os.path.exists(tmp_db):
+
+    last_err = None
+    for profile_name, cookie_db in cookie_dbs:
+        with tempfile.TemporaryDirectory(prefix="sp_cookies_") as tmp_dir:
+            tmp_db = os.path.join(tmp_dir, "cookies.db")
+            copy_success = False
+
+            # Method 1: Direct copy (works if browser is closed)
+            try:
+                shutil.copy2(cookie_db, tmp_db)
                 copy_success = True
-        except Exception:
-            pass
-    
-    # Method 4: Raw binary read with retry
-    if not copy_success:
-        try:
-            with open(cookie_db, 'rb') as src:
-                data = src.read()
-            with open(tmp_db, 'wb') as dst:
-                dst.write(data)
-            copy_success = True
-        except Exception:
-            pass
-    
-    if not copy_success:
-        return results, f"Could not copy {browser_name} cookie database. Close the browser and try again."
-    
-    try:
-        conn = sqlite3.connect(tmp_db)
-        cursor = conn.cursor()
-        
-        # Query for SharePoint cookies
-        cursor.execute(
-            "SELECT name, encrypted_value, host_key FROM cookies WHERE host_key LIKE ?",
-            (f'%{SP_DOMAIN}%',)
+            except (PermissionError, OSError):
+                pass
+
+            # Method 2: Use shadowcopy package (Windows VSS)
+            if not copy_success:
+                try:
+                    import shadowcopy
+                    shadowcopy.copy(cookie_db, tmp_db)
+                    copy_success = True
+                except Exception:
+                    pass
+
+            # Method 3: PowerShell raw copy using env vars (prevents path/command injection)
+            if not copy_success:
+                try:
+                    import subprocess
+                    env = dict(os.environ)
+                    env["SP_COOKIE_SRC"] = cookie_db
+                    env["SP_COOKIE_DST"] = tmp_db
+                    ps_cmd = (
+                        '$bytes = [System.IO.File]::ReadAllBytes($env:SP_COOKIE_SRC); '
+                        '[System.IO.File]::WriteAllBytes($env:SP_COOKIE_DST, $bytes)'
+                    )
+                    result_ps = subprocess.run(
+                        ['powershell', '-NoProfile', '-Command', ps_cmd],
+                        capture_output=True,
+                        timeout=10,
+                        env=env,
+                    )
+                    if result_ps.returncode == 0 and os.path.exists(tmp_db):
+                        copy_success = True
+                except Exception:
+                    pass
+
+            # Method 4: Raw binary read
+            if not copy_success:
+                try:
+                    with open(cookie_db, 'rb') as src:
+                        data = src.read()
+                    with open(tmp_db, 'wb') as dst:
+                        dst.write(data)
+                    copy_success = True
+                except Exception:
+                    pass
+
+            if not copy_success:
+                last_err = f"Could not copy {browser_name} ({profile_name}) cookie database. Close the browser and try again."
+                continue
+
+            conn = None
+            try:
+                conn = sqlite3.connect(tmp_db)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT name, encrypted_value, host_key FROM cookies WHERE host_key LIKE ?",
+                    (f'%{SP_DOMAIN}%',),
+                )
+                prof_fed = ''
+                prof_rt = ''
+                for name, encrypted_value, _host in cursor.fetchall():
+                    results['found_cookies'] += 1
+                    if name in ('FedAuth', 'rtFa') and encrypted_value:
+                        decrypted = _decrypt_cookie_value(encrypted_value, key)
+                        if decrypted == "__APP_BOUND_V20__":
+                            results['app_bound'] = True
+                        elif decrypted:
+                            if name == 'FedAuth':
+                                prof_fed = decrypted
+                            elif name == 'rtFa':
+                                prof_rt = decrypted
+                if prof_fed:
+                    results['fedauth'] = prof_fed
+                    results['rtfa'] = prof_rt
+                    results['profile'] = profile_name
+                    return results, None
+            except Exception as e:
+                last_err = f"Database read error ({profile_name}): {e}"
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+    if results['app_bound']:
+        return (
+            results,
+            f"{browser_name} uses Chrome/Edge App-Bound Encryption (v20). "
+            "Copy FedAuth and rtFa from DevTools (Application → Cookies) and paste them in Connection settings.",
         )
-        
-        for name, encrypted_value, host in cursor.fetchall():
-            results['found_cookies'] += 1
-            if name in ('FedAuth', 'rtFa') and encrypted_value:
-                decrypted = _decrypt_cookie_value(encrypted_value, key)
-                if decrypted:
-                    if name == 'FedAuth':
-                        results['fedauth'] = decrypted
-                    elif name == 'rtFa':
-                        results['rtfa'] = decrypted
-        
-        conn.close()
-    except Exception as e:
-        return results, f"Database read error: {e}"
-    finally:
-        try:
-            os.remove(tmp_db)
-        except:
-            pass
-    
-    return results, None
+    return results, last_err
 
 
 def extract_sp_cookies():

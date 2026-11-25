@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Unified Sync Tool{% endblock %}</title>
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("ui_theme") === "light" ? "light" : "dark";
+        var l = localStorage.getItem("ui_lang") === "ar" ? "ar" : "en";
+        var d = document.documentElement;
+        d.setAttribute("data-theme", t);
+        d.lang = l;
+        d.dir = l === "ar" ? "rtl" : "ltr";
+      } catch (_) {}
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Cairo:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+  {% block head_extra %}{% endblock %}
+</head>
+<body data-page="{{ active_page|default('overview') }}">
+  <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+
+  <!-- Shared Persistent Sidebar -->
+  <aside id="sidebar" class="sidebar" aria-label="Main navigation">
+    <a href="/" class="sidebar-brand" style="text-decoration:none;color:inherit;">
+      <div class="brand-icon">🚀</div>
+      <div>
+        <span class="brand-text" data-i18n="brand">Unified Sync</span>
+        <span class="brand-sub" data-i18n="brandSub">SharePoint & Google Drive</span>
+      </div>
+    </a>
+
+    <nav class="nav-list">
+      <a href="/" class="nav-item {{ 'active' if active_page == 'overview' else '' }}">
+        <span class="nav-icon">📊</span>
+        <span data-i18n="navOverview">Overview</span>
+      </a>
+      <a href="/sharepoint" class="nav-item {{ 'active' if active_page == 'sharepoint' else '' }}">
+        <span class="nav-icon">🌐</span>
+        <span data-i18n="navSp">SharePoint</span>
+        <span class="nav-badge" id="nav-sp-count">{{ sp_active_count }}/{{ sp_total_count }}</span>
+      </a>
+      <a href="/gdrive" class="nav-item {{ 'active' if active_page == 'gdrive' else '' }}">
+        <span class="nav-icon">📁</span>
+        <span data-i18n="navGd">Google Drive</span>
+        <span class="nav-badge" id="nav-gd-count">{{ gd_total_count }}</span>
+      </a>
+      <a href="/ledger" class="nav-item {{ 'active' if active_page == 'ledger' else '' }}">
+        <span class="nav-icon">📒</span>
+        <span data-i18n="navLedger">Downloaded Lectures</span>
+        <span class="nav-badge" id="nav-ledger-count">{{ ledger_count }}</span>
+      </a>
+      <a href="/logs" class="nav-item {{ 'active' if active_page == 'logs' else '' }}">
+        <span class="nav-icon">📝</span>
+        <span data-i18n="navLogs">Activity Log</span>
+        <span class="nav-live-dot" id="nav-log-live-dot" title="Sync active"></span>
+      </a>
+      <a href="/settings" class="nav-item {{ 'active' if active_page == 'settings' else '' }}">
+        <span class="nav-icon">⚙️</span>
+        <span data-i18n="navSettings">Settings</span>
+      </a>
+    </nav>
+
+    <!-- Single Source of Truth for Connection Status -->
+    <div class="sidebar-footer">
+      <a href="/settings?section=connections" class="sidebar-status-row sidebar-status-link" title="Manage SharePoint connection">
+        <span><span class="dot {{ 'dot-ok' if sp_auth else 'dot-err' }}"></span>SharePoint</span>
+        <span class="status-pill-text" data-i18n="{{ 'statusOk' if sp_auth else 'statusSetup' }}">{{ 'OK' if sp_auth else 'Setup' }}</span>
+      </a>
+      <a href="/settings?section=connections" class="sidebar-status-row sidebar-status-link" title="Manage Google Drive connection">
+        <span><span class="dot {{ 'dot-ok' if gd_auth else 'dot-err' }}" id="sb-gd-dot"></span>Google Drive</span>
+        <span class="status-pill-text" id="sb-gd-text" data-i18n="{{ 'statusOk' if gd_auth else 'statusSetup' }}">{{ 'OK' if gd_auth else 'Setup' }}</span>
+      </a>
+    </div>
+  </aside>
+
+  <!-- Main Workspace -->
+  <div class="main-content">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button type="button" class="menu-toggle" id="btn-menu-toggle" aria-label="Toggle menu">☰</button>
+        <h1 class="header-title" id="current-tab-title" data-tab-key="{{ page_title_key|default('navOverview') }}" data-i18n="{{ page_title_key|default('navOverview') }}">Overview</h1>
+      </div>
+
+      <div class="topbar-actions">
+        <button type="button" class="btn btn-outline btn-small" id="btn-theme-toggle" title="Toggle theme">☀️ Light</button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-lang-toggle" title="Switch language">العربية</button>
+        <button type="button" class="btn btn-outline btn-small" id="btn-dry-run-all">🔍 <span data-i18n="btnDryRunAll">Dry Run</span></button>
+        <button type="button" class="btn btn-danger btn-small" id="btn-stop-all" style="display:none;">🛑 <span data-i18n="btnStopSync">Stop Sync</span></button>
+        <button type="button" class="btn btn-success btn-small" id="btn-sync-all">🔄 <span data-i18n="btnSyncAll">Sync All</span></button>
+      </div>
+    </header>
+
+    <main class="content-area">
+      <div class="page-container">
+        <!-- Global Multi-Service Live Progress Bar (visible on every page while syncing) -->
+        <div id="live-progress-card" class="live-progress-card">
+          <div id="live-progress-body"></div>
+        </div>
+
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
+
+  <!-- Global Confirmation Modal -->
+  <div id="confirm-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+    <div class="modal-card" style="max-width:440px;">
+      <div class="card-header" id="confirm-modal-title" style="margin-bottom:10px;" data-i18n="confirm">Confirm</div>
+      <p id="confirm-modal-msg" class="muted" style="font-size:0.92rem;line-height:1.55;"></p>
+      <div class="form-actions" style="justify-content:flex-end;">
+        <button type="button" class="btn btn-outline" id="confirm-modal-cancel" data-i18n="cancel">Cancel</button>
+        <button type="button" class="btn" id="confirm-modal-ok" data-i18n="confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Global Toast Stack -->
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <script defer src="{{ url_for('static', filename='js/i18n.js') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/core.js') }}"></script>
+  {% block page_scripts %}{% endblock %}
+</body>
+</html>

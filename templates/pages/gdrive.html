@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Google Drive | Unified Sync Tool{% endblock %}
+
+{% block content %}
+  {% if not gd_auth %}
+  <div class="notice-bar">
+    <span>🔐 <strong data-i18n="gdBannerNotConn">Google Drive is not connected</strong> — <span class="muted" data-i18n="gdBannerNotConnSub">Sign in with Google or manage credentials in Settings.</span></span>
+    <div class="toolbar-row">
+      <a href="/gdrive/auth_page" class="btn btn-small">🔐 <span data-i18n="gdSignIn">Sign in with Google</span></a>
+      <a href="/settings?section=connections" class="btn btn-outline btn-small" data-i18n="navSettings">Settings</a>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="page-header-bar">
+    <div class="toolbar-row">
+      <div class="pill-group" id="gd-state-filter">
+        <button type="button" class="pill-btn active" data-state="all" data-i18n="filterAll">All</button>
+        <button type="button" class="pill-btn" data-state="active" data-i18n="active">Active</button>
+        <button type="button" class="pill-btn" data-state="paused" data-i18n="paused">Paused</button>
+      </div>
+      <input type="text" id="gd-filter-input" class="form-input" style="width:240px;padding:6px 10px;" data-i18n-placeholder="searchFoldersPh" placeholder="Filter targets...">
+    </div>
+
+    <div class="toolbar-row">
+      <button type="button" class="btn btn-outline btn-small" id="btn-gd-open-add">➕ <span data-i18n="addTargetBtn">Add Folder</span></button>
+      <button type="button" class="btn btn-success btn-small" id="btn-gd-sync">🔄 <span data-i18n="syncGdNow">Sync Google Drive</span></button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header-row" style="margin-bottom:10px;">
+      <div class="card-header">
+        📁 <span data-i18n="gdConfiguredTitle">Configured Google Drive Folders</span>
+        <span class="muted" id="gd-count-summary"></span>
+      </div>
+    </div>
+    <p class="muted" style="margin-bottom:12px;" data-i18n="spSyncOrderHint">
+      Drag rows to set sync order (top runs first). Paused targets stay saved and are skipped.
+    </p>
+    <div class="item-list" id="gd-list"></div>
+  </div>
+
+  <!-- Add / Edit Google Drive Folder Modal -->
+  <div id="gd-form-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="gd-modal-title">
+    <div class="modal-card">
+      <div class="card-header-row" style="margin-bottom:14px;">
+        <div class="card-header" id="gd-modal-title" data-i18n="gdAddEditTitle">Add / Edit Google Drive Folder</div>
+        <button type="button" class="btn btn-outline btn-small" id="gd-modal-close">✕</button>
+      </div>
+      <form id="gd-form">
+        <input type="hidden" id="gd-edit-index" value="-1">
+        <div class="form-grid">
+          <div class="form-group full">
+            <label for="gd-url" data-i18n="gdFolderUrl">Google Drive Folder URL or ID</label>
+            <input type="text" class="form-input" id="gd-url" dir="ltr" placeholder="https://drive.google.com/drive/folders/..." required>
+          </div>
+          <div class="form-group">
+            <label for="gd-name" data-i18n="gdFolderName">Display Name (auto-fetched)</label>
+            <input type="text" class="form-input" id="gd-name" required>
+          </div>
+          <div class="form-group">
+            <label for="gd-path" data-i18n="spLocalPath">Local Download Path</label>
+            <div class="input-with-button">
+              <input type="text" class="form-input" id="gd-path" dir="ltr" required>
+              <button type="button" class="btn btn-outline" id="btn-gd-browse-local">📂</button>
+            </div>
+          </div>
+        </div>
+        <div class="form-actions" style="justify-content:flex-end;">
+          <button type="button" class="btn btn-outline" id="gd-cancel-btn" data-i18n="cancel">Cancel</button>
+          <button type="submit" class="btn" id="gd-submit-btn" data-i18n="saveFolder">Save Target</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock %}
+
+{% block page_scripts %}
+  <script>
+    window.__INITIAL_GD_FOLDERS__ = {{ gd_folders|tojson if gd_folders else '[]' }};
+  </script>
+  <script defer src="{{ url_for('static', filename='js/folders.js') }}"></script>
+{% endblock %}
