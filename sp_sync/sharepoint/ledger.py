@@ -110,17 +110,31 @@ def find_ledger_entry(store, row: dict) -> Optional[dict]:
     return hits[0]
 
 
-def _remember_new_key(store, row: dict, entry: dict) -> None:
-    """Record the current item id / URL as an extra ledger key for an already-known file."""
-    new_key = _row_key(row)
-    if not new_key or not entry:
+def _upgrade_ledger_identity(store, row: dict, entry: dict) -> None:
+    """Update item_id / rel_url on the matched ledger row and move its key in place.
+
+    Used when a later sync sees a known recording with a new SharePoint item id.
+    Never inserts a second row for the same file.
+    """
+    if not row or not entry:
         return
-    if entry.get("item_key") == new_key or store.ledger_get(new_key) is not None:
+    old_key = (entry.get("item_key") or "").strip()
+    if not old_key:
         return
-    local = entry.get("local_path") or ""
-    if not local:
+    new_id = (str(row.get("item_id") or "").strip() or None)
+    new_rel = (str(row.get("rel_url") or "").strip() or None)
+    if not new_id and not new_rel:
         return
-    _record(store, row, local, entry.get("source") or "existing")
+    if new_id == (entry.get("item_id") or None) and new_rel in (None, entry.get("rel_url") or None):
+        # Even if fields match, the stored key may still be url: while item_id is now known.
+        desired = _row_key({"item_id": new_id or entry.get("item_id"), "rel_url": new_rel or entry.get("rel_url")})
+        if desired and desired == old_key:
+            return
+    try:
+        store.ledger_upgrade_identity(old_key, item_id=new_id, rel_url=new_rel)
+    except Exception:
+        # Upgrade is best-effort; skip logic already prevented a re-download.
+        pass
 
 
 def _naive_utc(dt: datetime) -> datetime:
@@ -182,10 +196,15 @@ def backfill_folder(store, download_dir: str, files: Iterable[dict], log: Option
     """
     log = log or _noop
     folder_hint = os.path.basename(os.path.abspath(download_dir.rstrip("/\\"))) or ""
-    pending = [
-        r for r in (files or [])
-        if (r.get("name") and _row_key(r) and store.ledger_get(_row_key(r)) is None)
-    ]
+    pending = []
+    for r in (files or []):
+        if not r.get("name") or not _row_key(r):
+            continue
+        entry = find_ledger_entry(store, r)
+        if entry:
+            _upgrade_ledger_identity(store, r, entry)
+            continue
+        pending.append(r)
     if not pending:
         return 0
     claimed = set(store.ledger_paths())
@@ -277,7 +296,7 @@ def plan_download(
         shown = os.path.basename(entry.get("local_path") or "") or name
         log(f"[-] Skip '{name}' (in download ledger as '{shown}')")
         if not dry_run:
-            _remember_new_key(store, row, entry)
+            _upgrade_ledger_identity(store, row, entry)
         return None
     if entry and entry.get("redownload_requested"):
         recorded = entry.get("local_path") or ""

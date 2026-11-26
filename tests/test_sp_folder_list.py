@@ -159,6 +159,7 @@ class TestListFolderV2SharesFallback(unittest.TestCase):
             "/personal/u/Documents/T",
             timeout=5,
             sharing_link_url=share,
+            share_root_norm="/personal/u/Documents/T",
         )
         self.assertTrue(out["ok"])
         self.assertEqual(out["method"], "v2_shares")
@@ -177,6 +178,7 @@ class TestListFolderV2SharesFallback(unittest.TestCase):
             "/personal/u/Documents/T",
             timeout=5,
             sharing_link_url=share,
+            share_root_norm="/personal/u/Documents/T",
         )
         self.assertTrue(out["ok"])
         self.assertEqual(out["method"], "v2_shares")
@@ -192,11 +194,80 @@ class TestListFolderV2SharesFallback(unittest.TestCase):
             "/personal/u/Documents/T",
             timeout=5,
             sharing_link_url=share,
+            share_root_norm="/personal/u/Documents/T",
         )
         self.assertFalse(out["ok"])
         self.assertEqual(out["method"], "v2_shares")
         self.assertEqual(out.get("upstream_http_status"), 403)
         self.assertEqual(len(sess.calls), 1)
+
+    def test_subfolder_without_share_root_falls_through_to_expand(self):
+        """MBA-05 case: v2 must not list the 11 share-root program folders."""
+        share = "https://tenant-my.sharepoint.com/:f:/g/personal/u/abc?e=1"
+        expand_files = [
+            {
+                "Name": f"أساسيات الاقتصاد MBA-05-2026101{i}_120000UTC-Meeting Recording.mp4",
+                "ServerRelativeUrl": (
+                    "/personal/u/Documents/تسجيلات الدراسات العليا/"
+                    "ماجستير مهنى في إدارة الاعمال عربى MBA/أساسيات الاقتصاد MBA-05/"
+                    f"أساسيات الاقتصاد MBA-05-2026101{i}_120000UTC-Meeting Recording.mp4"
+                ),
+                "Length": 1000 + i,
+            }
+            for i in range(7)
+        ]
+        expand_payload = {"d": {"Folders": {"results": []}, "Files": {"results": expand_files}}}
+        # v2 must not be called (no scoped URL). The first request is $expand.
+        sess = self._Sess([_resp(200, expand_payload)])
+        parent = (
+            "/personal/u/Documents/تسجيلات الدراسات العليا/"
+            "ماجستير مهنى في إدارة الاعمال عربى MBA/أساسيات الاقتصاد MBA-05"
+        )
+        out = list_folder_children_rest(
+            sess,
+            "https://tenant-my.sharepoint.com/personal/u",
+            parent,
+            timeout=5,
+            sharing_link_url=share,
+            # share_root unknown / not prefix-matching the MBA-05 path
+            share_root_norm=None,
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["method"], "expand")
+        self.assertEqual(len(out["files"]), 7)
+        self.assertEqual(len(out["folders"]), 0)
+        self.assertTrue(any("$expand=" in c for c in sess.calls))
+        self.assertFalse(
+            any(
+                c.rstrip("/").endswith("/driveItem/children") and ":/" not in c.split("driveItem")[-1]
+                for c in sess.calls
+            )
+        )
+
+    def test_subfolder_v2_404_falls_through_to_expand(self):
+        share = "https://tenant-my.sharepoint.com/:f:/g/personal/u/abc?e=1"
+        expand_files = [
+            {
+                "Name": "lecture.mp4",
+                "ServerRelativeUrl": "/personal/u/Documents/Root/MBA-05/lecture.mp4",
+                "Length": 50,
+            }
+        ]
+        expand_payload = {"d": {"Folders": {"results": []}, "Files": {"results": expand_files}}}
+        sess = self._Sess([_resp(404, text='{"error":{}}'), _resp(200, expand_payload)])
+        out = list_folder_children_rest(
+            sess,
+            "https://tenant-my.sharepoint.com/personal/u",
+            "/personal/u/Documents/Root/MBA-05",
+            timeout=5,
+            sharing_link_url=share,
+            share_root_norm="/personal/u/Documents/Root",
+        )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["method"], "expand")
+        self.assertEqual(len(out["files"]), 1)
+        self.assertIn("driveItem:/MBA-05:/children", sess.calls[0])
+        self.assertIn("$expand=", sess.calls[1])
 
 
 class TestExpandExtract(unittest.TestCase):
@@ -504,6 +575,24 @@ class TestV2SharesChildrenUrl(unittest.TestCase):
         )
         self.assertIn("/driveItem/01ITEMID/children", url)
 
+    def test_subfolder_without_share_root_does_not_fall_back_to_root(self):
+        url = _v2_shares_children_api_url(
+            "https://tenant-my.sharepoint.com",
+            "u!abc",
+            "/personal/u/Documents/تسجيلات الدراسات العليا/ماجستير مهنى في إدارة الاعمال عربى MBA/أساسيات الاقتصاد MBA-05",
+            share_root_norm=None,
+        )
+        self.assertIsNone(url)
+
+    def test_subfolder_outside_share_root_does_not_fall_back_to_root(self):
+        url = _v2_shares_children_api_url(
+            "https://tenant-my.sharepoint.com",
+            "u!abc",
+            "/personal/u/Documents/تسجيلات الدراسات العليا/ماجستير مهنى في إدارة الاعمال عربى MBA/أساسيات الاقتصاد MBA-05",
+            share_root_norm="/personal/u/Documents/OtherRoot",
+        )
+        self.assertIsNone(url)
+
 
 class TestV2SharesPagination(unittest.TestCase):
     class _Sess:
@@ -536,6 +625,7 @@ class TestV2SharesPagination(unittest.TestCase):
             "https://tenant-my.sharepoint.com/:f:/g/personal/token",
             "/personal/u/Documents/Root",
             timeout=5,
+            share_root_norm="/personal/u/Documents/Root",
         )
         self.assertTrue(out["ok"])
         self.assertEqual(len(out["folders"]), 1)

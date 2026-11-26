@@ -392,12 +392,18 @@ def _v2_shares_children_api_url(
     *,
     parent_item_id: str | None = None,
     share_root_norm: str | None = None,
-) -> str:
+) -> str | None:
     """
-    Build v2.0/shares children URL for share root, a subfolder (by item id), or by path under share root.
+    Build v2.0/shares children URL for the share root, a subfolder (by item id),
+    or a path under the share root.
+
+    Returns None when the request is for a subfolder but cannot be addressed
+    safely (no item id, no share root, or the path is not under the share root).
+    Callers must then fall through to the classic $expand / split listing —
+    never silently list ``driveItem/children`` of the share root.
     """
     base = (site_host_root or "").strip().rstrip("/")
-    if parent_item_id:
+    if parent_item_id and str(parent_item_id).strip():
         item = urllib.parse.quote(str(parent_item_id).strip(), safe="")
         return f"{base}/_api/v2.0/shares/{share_token}/driveItem/{item}/children"
 
@@ -407,18 +413,23 @@ def _v2_shares_children_api_url(
         if share_root_norm
         else ""
     )
-    if root and parent != root:
-        root_prefix = root.rstrip("/") + "/"
-        if parent.startswith(root_prefix) or parent == root.rstrip("/"):
-            rel = parent[len(root.rstrip("/")) :].lstrip("/")
-            if rel:
-                rel_enc = "/".join(
-                    urllib.parse.quote(seg, safe="") for seg in rel.split("/") if seg
-                )
-                return (
-                    f"{base}/_api/v2.0/shares/{share_token}/driveItem:/{rel_enc}:/children"
-                )
-    return f"{base}/_api/v2.0/shares/{share_token}/driveItem/children"
+    if not root:
+        # Without a known share root we cannot tell whether *parent* is the
+        # shared folder or a nested path. Refuse the unscoped root listing.
+        return None
+    if parent == root:
+        return f"{base}/_api/v2.0/shares/{share_token}/driveItem/children"
+    root_prefix = root.rstrip("/") + "/"
+    if parent.startswith(root_prefix):
+        rel = parent[len(root.rstrip("/")) :].lstrip("/")
+        if rel:
+            rel_enc = "/".join(
+                urllib.parse.quote(seg, safe="") for seg in rel.split("/") if seg
+            )
+            return (
+                f"{base}/_api/v2.0/shares/{share_token}/driveItem:/{rel_enc}:/children"
+            )
+    return None
 
 
 def _v2_shares_list_children(
@@ -451,6 +462,8 @@ def _v2_shares_list_children(
             parent_item_id=parent_item_id,
             share_root_norm=share_root_norm,
         )
+        if not url:
+            return None
         req_headers = {"Accept": "application/json"}
         val: list[dict[str, Any]] = []
         cur_url: str | None = url
@@ -608,7 +621,17 @@ def list_folder_children_rest(
             return v2_first
         if v2_first and not v2_first.get("ok"):
             st_v2 = v2_first.get("upstream_http_status")
-            if st_v2 in (401, 403, 404):
+            parent_n = normalize_server_relative_folder_path(norm)
+            root_n = (
+                normalize_server_relative_folder_path(share_root_norm)
+                if share_root_norm
+                else ""
+            )
+            # Auth failure on the share root (or a specific item id) can stop
+            # here. A subfolder 404/403 must fall through to $expand / split;
+            # those paths work when v2 cannot address the nested folder.
+            targeted_root = bool(root_n) and parent_n == root_n and not parent_item_id
+            if st_v2 in (401, 403) and (targeted_root or parent_item_id):
                 return v2_first
 
     # 1) Try single GET with $expand=Folders,Files (one round-trip, consistent snapshot)

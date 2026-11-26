@@ -240,14 +240,53 @@ class TestStableLedgerIdentity(_Base):
     def test_skip_when_new_item_id_same_rel_url(self):
         r = self.row("20261107_181338", item_id=None, size=1000)
         path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-11-07_01.mp4"), 1000)
-        self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
-                                 local_path=path, size=1000)
+        old_key = self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
+                                           local_path=path, size=1000)
+        self.assertTrue(old_key.startswith("url:"))
         r_new = dict(r, item_id="NEW-GUID-FROM-SHARE")
         self.assertIsNone(ledger.plan_download(self.store, self.dir, r_new))
-        # runtime alias: the new id key now points at the same local file
-        alias = self.store.ledger_get(ledger_key("NEW-GUID-FROM-SHARE", r["rel_url"]))
-        self.assertIsNotNone(alias)
-        self.assertEqual(alias["local_path"], os.path.abspath(path))
+        upgraded = self.store.ledger_get(ledger_key("NEW-GUID-FROM-SHARE", r["rel_url"]))
+        self.assertIsNotNone(upgraded)
+        self.assertEqual(upgraded["local_path"], os.path.abspath(path))
+        self.assertEqual(upgraded["item_id"], "NEW-GUID-FROM-SHARE")
+        self.assertEqual(upgraded["rel_url"], r["rel_url"])
+        self.assertEqual(upgraded["item_key"], "id:NEW-GUID-FROM-SHARE")
+        # in-place upgrade: the old url: key is gone, no duplicate row
+        self.assertIsNone(self.store.ledger_get(old_key))
+        self.assertEqual(len(self.store.ledger_list()), 1)
+
+    def test_ledger_record_same_file_does_not_insert_duplicate(self):
+        r = self.row("20261027_105257", item_id=None, size=1700)
+        path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-10-27_03.mp4"), 1700)
+        url_key = self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
+                                           local_path=path, size=1700, source="backfill")
+        id_key = self.store.ledger_record(item_id="SAME-FILE-GUID", rel_url=r["rel_url"],
+                                          original_name=r["name"], local_path=path, size=1700,
+                                          source="download")
+        self.assertEqual(id_key, "id:SAME-FILE-GUID")
+        self.assertEqual(len(self.store.ledger_list()), 1)
+        self.assertIsNone(self.store.ledger_get(url_key))
+        row = self.store.ledger_get(id_key)
+        self.assertEqual(row["local_path"], os.path.abspath(path))
+        self.assertEqual(row["item_id"], "SAME-FILE-GUID")
+        self.assertEqual(row["rel_url"], r["rel_url"])
+
+    def test_upgrade_identity_keeps_local_path_and_timestamp(self):
+        r = self.row("20261116_111118", item_id=None, size=1930)
+        path = _touch(os.path.join(self.dir, f"{SUBJ}_2026-11-16_09.mp4"), 1930)
+        old_key = self.store.ledger_record(item_id=None, rel_url=r["rel_url"], original_name=r["name"],
+                                           local_path=path, size=1930, source="backfill")
+        before = self.store.ledger_get(old_key)
+        new_key = self.store.ledger_upgrade_identity(
+            old_key, item_id="UPGRADED-GUID", rel_url=r["rel_url"]
+        )
+        self.assertEqual(new_key, "id:UPGRADED-GUID")
+        self.assertEqual(len(self.store.ledger_list()), 1)
+        row = self.store.ledger_get(new_key)
+        self.assertEqual(row["local_path"], before["local_path"])
+        self.assertEqual(row["source"], "backfill")
+        self.assertEqual(row["downloaded_at"], before["downloaded_at"])
+        self.assertEqual(row["item_id"], "UPGRADED-GUID")
 
     def test_skip_when_only_original_name_and_stamp_match(self):
         r = self.row("20261114_144615", item_id=None, size=2000)
@@ -256,6 +295,8 @@ class TestStableLedgerIdentity(_Base):
                                  local_path=path, size=2000)
         r_new = dict(r, item_id="OTHER-ID", rel_url=r["rel_url"] + "?share=new")
         self.assertIsNone(ledger.plan_download(self.store, self.dir, r_new))
+        self.assertEqual(len(self.store.ledger_list()), 1)
+        self.assertIsNotNone(self.store.ledger_get("id:OTHER-ID"))
 
     def test_redownload_requested_honored_after_key_change(self):
         r = self.row("20261107_181338", item_id=None, size=1000)

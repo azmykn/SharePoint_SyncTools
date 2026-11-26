@@ -173,6 +173,7 @@ class TestP0SharePointFixes(unittest.TestCase):
             "https://tenant-my.sharepoint.com/personal/u",
             "/personal/u/Documents/T",
             sharing_link_url="https://tenant-my.sharepoint.com/:f:/g/personal/u/tok?e=1",
+            share_root_norm="/personal/u/Documents/T",
         )
         self.assertTrue(out["ok"])
         self.assertEqual(s.headers["Accept"], "application/json;odata=verbose")

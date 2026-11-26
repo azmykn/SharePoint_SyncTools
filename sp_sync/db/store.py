@@ -408,14 +408,43 @@ class AppStore:
         modified: Optional[str] = None,
         source: str = "download",
     ) -> str:
-        """Insert or update a ledger row (clears any pending re-download request)."""
+        """Insert or update a ledger row (clears any pending re-download request).
+
+        If the same recording is already stored under a different key (``url:`` vs
+        ``id:``), or the same ``local_path`` / ``rel_url`` already has a row, that
+        existing row is updated in place instead of inserting a duplicate.
+        """
         key = ledger_key(item_id, rel_url)
         if not key:
             raise ValueError("ledger_record needs item_id or rel_url")
-        local_dir = os.path.dirname(os.path.abspath(local_path)) if local_path else ""
+        abs_path = os.path.abspath(local_path) if local_path else ""
+        local_dir = os.path.dirname(abs_path) if abs_path else ""
         now = datetime.now().isoformat(timespec="seconds")
         size_val = int(size) if size is not None else None
+        iid = (str(item_id).strip() or None) if item_id else None
+        rel = (str(rel_url).strip() or None) if rel_url else None
         with _lock, self._connect() as conn:
+            existing = _lookup_ledger_row(
+                conn, key=key, item_id=iid, rel_url=rel, local_path=abs_path
+            )
+            if existing:
+                merged_id = iid or existing["item_id"]
+                merged_rel = rel or existing["rel_url"]
+                new_key = ledger_key(merged_id, merged_rel) or existing["item_key"]
+                fields = {
+                    "item_id": merged_id,
+                    "rel_url": merged_rel,
+                    "original_name": original_name or existing["original_name"] or "",
+                    "size": size_val if size_val is not None else existing["size"],
+                    "modified": modified if modified is not None else existing["modified"],
+                    "local_dir": local_dir or existing["local_dir"],
+                    "local_path": abs_path or existing["local_path"],
+                    "source": source,
+                    "redownload_requested": 0,
+                    "downloaded_at": now,
+                }
+                _update_ledger_row(conn, existing["item_key"], new_key, fields)
+                return new_key
             conn.execute(
                 """
                 INSERT INTO downloaded_files (item_key, item_id, rel_url, original_name, size,
@@ -430,18 +459,65 @@ class AppStore:
                 """,
                 (
                     key,
-                    item_id or None,
-                    rel_url or None,
+                    iid,
+                    rel,
                     original_name or "",
                     size_val,
                     modified,
                     local_dir,
-                    os.path.abspath(local_path) if local_path else "",
+                    abs_path,
                     source,
                     now,
                 ),
             )
         return key
+
+    def ledger_upgrade_identity(
+        self,
+        item_key: str,
+        *,
+        item_id: Optional[str] = None,
+        rel_url: Optional[str] = None,
+    ) -> str:
+        """Update item_id / rel_url on an existing row and move its key in place.
+
+        Never inserts a second row. ``downloaded_at``, ``local_path`` and ``source``
+        are left unchanged. If the upgraded ``id:`` key already exists, the two
+        rows are merged and the old key is deleted.
+        """
+        if not item_key:
+            return ""
+        iid = (str(item_id).strip() or None) if item_id else None
+        rel = (str(rel_url).strip() or None) if rel_url else None
+        with _lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM downloaded_files WHERE item_key = ?", (item_key,)
+            ).fetchone()
+            if not row:
+                return ""
+            merged_id = iid or row["item_id"]
+            merged_rel = rel or row["rel_url"]
+            new_key = ledger_key(merged_id, merged_rel) or row["item_key"]
+            if (
+                new_key == row["item_key"]
+                and merged_id == row["item_id"]
+                and merged_rel == row["rel_url"]
+            ):
+                return row["item_key"]
+            fields = {
+                "item_id": merged_id,
+                "rel_url": merged_rel,
+                "original_name": row["original_name"],
+                "size": row["size"],
+                "modified": row["modified"],
+                "local_dir": row["local_dir"],
+                "local_path": row["local_path"],
+                "source": row["source"],
+                "redownload_requested": row["redownload_requested"],
+                "downloaded_at": row["downloaded_at"],
+            }
+            _update_ledger_row(conn, row["item_key"], new_key, fields)
+            return new_key
 
     def ledger_request_redownload(self, item_key: str) -> bool:
         with _lock, self._connect() as conn:
@@ -499,6 +575,84 @@ class AppStore:
                 "SELECT local_path FROM downloaded_files WHERE local_dir = ?", (d,)
             ).fetchall()
         return [os.path.basename(r[0]) for r in rows if r[0]]
+
+
+
+def _lookup_ledger_row(conn, *, key: str, item_id: Optional[str], rel_url: Optional[str], local_path: str):
+    """Find an existing ledger row by key, item id, rel_url, or local path."""
+    if key:
+        row = conn.execute(
+            "SELECT * FROM downloaded_files WHERE item_key = ?", (key,)
+        ).fetchone()
+        if row:
+            return row
+    if item_id:
+        row = conn.execute(
+            "SELECT * FROM downloaded_files WHERE item_id = ?", (item_id,)
+        ).fetchone()
+        if row:
+            return row
+    if rel_url:
+        url_key = ledger_key(None, rel_url)
+        row = conn.execute(
+            "SELECT * FROM downloaded_files WHERE item_key = ? OR rel_url = ?",
+            (url_key, rel_url),
+        ).fetchone()
+        if row:
+            return row
+    if local_path:
+        rows = conn.execute(
+            "SELECT * FROM downloaded_files WHERE local_path = ?", (local_path,)
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]
+        if len(rows) > 1:
+            for row in rows:
+                if str(row["item_key"] or "").startswith("id:"):
+                    return row
+            return rows[0]
+    return None
+
+
+def _update_ledger_row(conn, old_key: str, new_key: str, fields: dict) -> None:
+    """Apply field updates, renaming item_key in place or merging if the new key exists."""
+    cols = (
+        "item_id",
+        "rel_url",
+        "original_name",
+        "size",
+        "modified",
+        "local_dir",
+        "local_path",
+        "source",
+        "redownload_requested",
+        "downloaded_at",
+    )
+    values = [fields.get(c) for c in cols]
+    if new_key == old_key:
+        assignments = ", ".join(f"{c} = ?" for c in cols)
+        conn.execute(
+            f"UPDATE downloaded_files SET {assignments} WHERE item_key = ?",
+            (*values, old_key),
+        )
+        return
+    clash = conn.execute(
+        "SELECT item_key FROM downloaded_files WHERE item_key = ?", (new_key,)
+    ).fetchone()
+    if clash:
+        assignments = ", ".join(f"{c} = ?" for c in cols)
+        conn.execute(
+            f"UPDATE downloaded_files SET {assignments} WHERE item_key = ?",
+            (*values, new_key),
+        )
+        if old_key != new_key:
+            conn.execute("DELETE FROM downloaded_files WHERE item_key = ?", (old_key,))
+        return
+    assignments = ", ".join(f"{c} = ?" for c in cols)
+    conn.execute(
+        f"UPDATE downloaded_files SET item_key = ?, {assignments} WHERE item_key = ?",
+        (new_key, *values, old_key),
+    )
 
 
 def ledger_key(item_id: Optional[str], rel_url: Optional[str]) -> str:
